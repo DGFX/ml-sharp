@@ -19,8 +19,12 @@ image = (
     )
     .pip_install("numpy", "ninja", "jaxtyping", "rich", "setuptools", "wheel")
     .run_commands(
+        "pip download --no-deps --no-binary gsplat gsplat==1.5.3 -d /tmp/gsplat",
+        "tar xzf /tmp/gsplat/gsplat-1.5.3.tar.gz -C /tmp/gsplat",
+        "sed -i 's/-std=c++17/-std=c++20/' /tmp/gsplat/gsplat-1.5.3/setup.py",
         "CC=gcc CXX=g++ TORCH_CUDA_ARCH_LIST='8.0;8.6;8.9' MAX_JOBS=16 "
-        "pip install --no-build-isolation --no-binary gsplat gsplat==1.5.3"
+        "pip install --no-build-isolation /tmp/gsplat/gsplat-1.5.3",
+        "rm -rf /tmp/gsplat",
     )
     .pip_install(
         "timm==1.0.30",
