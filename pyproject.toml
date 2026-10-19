@@ -74,6 +74,8 @@ lint.ignore = ["D100", "D105",
 extend-exclude = [
     "*external*",
     "third_party",
+    "src/sharp/models/decoders/monodepth_decoder.py",
+    "src/sharp/utils/gaussians.py",
 ]
 src = ["sharp"]
 target-version = "py39"
