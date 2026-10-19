@@ -13,13 +13,13 @@ GPU = "A100-40GB"
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.13")
-    .apt_install("git", "ffmpeg", "libgl1", "libglib2.0-0")
+    .apt_install("git", "build-essential", "ffmpeg", "libgl1", "libglib2.0-0")
     .pip_install(
         "torch==2.14.1", "torchvision==0.29.1", index_url="https://download.pytorch.org/whl/cu126"
     )
     .pip_install("numpy", "ninja", "jaxtyping", "rich", "setuptools", "wheel")
     .run_commands(
-        "TORCH_CUDA_ARCH_LIST='8.0;8.6;8.9' MAX_JOBS=16 "
+        "CC=gcc CXX=g++ TORCH_CUDA_ARCH_LIST='8.0;8.6;8.9' MAX_JOBS=16 "
         "pip install --no-build-isolation --no-binary gsplat gsplat==1.5.3"
     )
     .pip_install(
