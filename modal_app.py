@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import modal
@@ -38,6 +39,10 @@ image = (
         "lpips==0.1.4",
         "piq==0.8.0",
     )
+    .run_commands(
+        "python -c 'from torchvision.models import ResNet50_Weights, resnet50; "
+        "resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)'"
+    )
     .env({"PYTHONPATH": "/root/repo/src", "PYTHONUNBUFFERED": "1"})
     .add_local_dir("src", "/root/repo/src")
 )
@@ -71,6 +76,14 @@ def cuda_setup():
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=1))
+
+
+def volume_path(path):
+    path = Path(path)
+    return path if path.is_absolute() else VOLUME_ROOT / path
+
+
+STAGE3_INIT = "runs/stage2-29fefbe/checkpoints/final.pt"
 
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
@@ -307,8 +320,7 @@ def stage2_train(
     }
 
 
-@app.function(gpu=GPU, timeout=40 * 60, volumes={VOLUME_ROOT: volume})
-def stage2_eval(run_name: str, checkpoints: str):
+def evaluate_run(run_name, checkpoints):
     import torch
     from sharp_train import model, stage2
     from sharp_train.data import HypersimPairs
@@ -350,6 +362,192 @@ def stage2_eval(run_name: str, checkpoints: str):
     return summaries
 
 
+@app.function(gpu=GPU, timeout=40 * 60, volumes={VOLUME_ROOT: volume})
+def stage2_eval(run_name: str, checkpoints: str):
+    return evaluate_run(run_name, checkpoints)
+
+
+def load_stage3_predictor(apple_checkpoint, init_checkpoint, grid, device):
+    from sharp_train import stage2
+
+    path = volume_path(init_checkpoint)
+    if not path.exists():
+        raise FileNotFoundError(f"missing init checkpoint: {path}")
+    predictor, step = stage2.load_checkpoint(apple_checkpoint, path)
+    if predictor.grid != grid:
+        raise ValueError(f"checkpoint grid {predictor.grid} does not match --grid {grid}")
+    return predictor.to(device), step, path
+
+
+@app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
+def stage3_check(
+    run_name: str, train_scenes: str, grid: int, init_checkpoint: str, depth_correction: int
+):
+    import math
+
+    import torch
+    from sharp_train import checks, stage3
+
+    device = cuda_setup()
+    out_dir = RUNS_ROOT / run_name
+    apple_checkpoint = ensure_checkpoint()
+    predictor, init_step, init_path = load_stage3_predictor(
+        apple_checkpoint, init_checkpoint, grid, device
+    )
+    _, scenes = held_out_split(train_scenes)
+    _, loader = train_loader(scenes, 0)
+    loss = stage3.Stage3Loss(device)
+    report = checks.throughput_check(
+        predictor,
+        loader,
+        30,
+        out_dir / "check",
+        stage3=loss,
+        depth_correction=bool(depth_correction),
+        lr=1.6e-4,
+        warmup=5,
+    )
+    keys = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale", "total"]
+    report["losses_finite"] = all(math.isfinite(report["last"][key]) for key in keys)
+    report["init_checkpoint"] = str(init_path)
+    report["init_step"] = init_step
+    report["depth_correction"] = bool(depth_correction)
+    report["gpu"] = torch.cuda.get_device_name()
+    report["passed"] = bool(report["finite"] and report["losses_finite"])
+    write_json(out_dir / "stage3_check.json", report)
+    volume.commit()
+    print(
+        json.dumps(
+            {
+                "seconds_per_step": report["seconds_per_step"],
+                "peak_memory_gb": report["peak_memory_gb"],
+                "passed": report["passed"],
+                "last": report["last"],
+            }
+        ),
+        flush=True,
+    )
+    return {
+        "passed": report["passed"],
+        "seconds_per_step": report["seconds_per_step"],
+        "peak_memory_gb": report["peak_memory_gb"],
+        "last": report["last"],
+    }
+
+
+@app.function(gpu=GPU, timeout=120 * 60, volumes={VOLUME_ROOT: volume})
+def stage3_train(
+    run_name: str,
+    train_scenes: str,
+    grid: int,
+    steps: int,
+    lr: float,
+    warmup: int,
+    max_minutes: float,
+    checkpoint_every: int,
+    val_every: int,
+    seed: int,
+    init_checkpoint: str,
+    depth_correction: int,
+):
+    import torch
+    from sharp_train import losses, stage2, stage3, train, viz
+
+    device = cuda_setup()
+    out_dir = RUNS_ROOT / run_name
+    apple_checkpoint = ensure_checkpoint()
+    spec, scenes = held_out_split(train_scenes)
+    train_set, loader = train_loader(scenes, seed)
+    validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
+    torch.manual_seed(seed)
+    predictor, init_step, init_path = load_stage3_predictor(
+        apple_checkpoint, init_checkpoint, grid, device
+    )
+    loss = stage3.Stage3Loss(device)
+    correction = bool(depth_correction)
+    meta = {
+        "grid": grid,
+        "input_resolution": predictor.input_resolution,
+        "train_scenes": scenes,
+        "train_pairs": len(train_set),
+        "validation_pairs": spec["validation_pairs"],
+        "steps": steps,
+        "lr": lr,
+        "warmup": warmup,
+        "seed": seed,
+        "gpu": torch.cuda.get_device_name(),
+        "init_checkpoint": str(init_path),
+        "init_step": init_step,
+        "depth_correction": correction,
+        "weights": losses.STAGE3_WEIGHTS,
+    }
+    stage2.save_json(out_dir / "train_meta.json", meta)
+    val_history = [
+        {
+            "step": 0,
+            **stage2.validation_loss(
+                predictor, validation, device, stage3=loss, depth_correction=correction
+            ),
+        }
+    ]
+    print(json.dumps({"validation": val_history[-1]}), flush=True)
+
+    def callback(step, last):
+        done = step + 1
+        if done % val_every == 0 or last:
+            val_history.append(
+                {
+                    "step": done,
+                    **stage2.validation_loss(
+                        predictor, validation, device, stage3=loss, depth_correction=correction
+                    ),
+                }
+            )
+            print(json.dumps({"validation": val_history[-1]}), flush=True)
+            stage2.save_json(out_dir / "val_history.json", val_history)
+        if done % checkpoint_every == 0 or last:
+            name = "final" if last else f"step_{done:06d}"
+            stage2.save_checkpoint(
+                predictor, out_dir / "checkpoints" / f"{name}.pt", done, {"meta": meta}
+            )
+            volume.commit()
+
+    history = train.train(
+        predictor,
+        loader,
+        steps,
+        out_dir,
+        lr=lr,
+        warmup=warmup,
+        mask_key="mask_visible_tgt",
+        log_every=50,
+        max_seconds=max_minutes * 60,
+        callback=callback,
+        stage3=loss,
+        depth_correction=correction,
+    )
+    curve_keys = ["total", "color_src", "color_tgt", "alpha", "percep", "depth_tgt"]
+    viz.save_curve(history, curve_keys, out_dir / "train_curve.png", f"{run_name} train")
+    viz.save_curve(
+        val_history, curve_keys, out_dir / "val_curve.png", f"{run_name} held-out validation"
+    )
+    stage2.save_json(out_dir / "val_history.json", val_history)
+    volume.commit()
+    return {
+        "steps": history[-1]["step"] + 1,
+        "train_first": history[0],
+        "train_last": history[-1],
+        "val_first": val_history[0],
+        "val_last": val_history[-1],
+        "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
+    }
+
+
+@app.function(gpu=GPU, timeout=60 * 60, volumes={VOLUME_ROOT: volume})
+def stage3_eval(run_name: str, checkpoints: str):
+    return evaluate_run(run_name, checkpoints)
+
+
 @app.local_entrypoint()
 def main(
     task: str = "stage1",
@@ -369,6 +567,11 @@ def main(
     seed: int = 0,
     throughput_steps: int = 40,
     checkpoints: str = "final",
+    mode: str = "check",
+    gpu: str = "",
+    timeout_minutes: float = 0,
+    init_checkpoint: str = STAGE3_INIT,
+    depth_correction: int = 1,
 ):
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
@@ -391,3 +594,35 @@ def main(
         )
     if task == "stage2-eval":
         print(stage2_eval.remote(run_name, checkpoints))
+    if task == "stage3":
+        chosen = gpu or os.environ.get("STAGE3_GPU") or GPU
+        options = {"gpu": chosen}
+        if timeout_minutes:
+            options["timeout"] = int(timeout_minutes * 60)
+        if mode == "check":
+            print(
+                stage3_check.with_options(**options).remote(
+                    run_name, train_scenes, grid, init_checkpoint, depth_correction
+                )
+            )
+        elif mode == "train":
+            print(
+                stage3_train.with_options(**options).remote(
+                    run_name,
+                    train_scenes,
+                    grid,
+                    steps,
+                    lr,
+                    warmup,
+                    max_minutes,
+                    checkpoint_every,
+                    val_every,
+                    seed,
+                    init_checkpoint,
+                    depth_correction,
+                )
+            )
+        elif mode == "eval":
+            print(stage3_eval.with_options(**options).remote(run_name, checkpoints))
+        else:
+            raise ValueError(f"unknown stage3 mode {mode}")

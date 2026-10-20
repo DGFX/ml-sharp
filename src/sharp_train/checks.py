@@ -394,7 +394,9 @@ def mean_of(rows, key):
     return sum(row[key] for row in rows) / max(len(rows), 1)
 
 
-def throughput_check(predictor, loader, steps, out_dir):
+def throughput_check(
+    predictor, loader, steps, out_dir, stage3=None, depth_correction=True, lr=1e-4, warmup=5
+):
     torch.cuda.reset_peak_memory_stats()
     started = None
     timings = []
@@ -412,11 +414,13 @@ def throughput_check(predictor, loader, steps, out_dir):
         loader,
         steps,
         out_dir,
-        lr=1e-4,
-        warmup=5,
+        lr=lr,
+        warmup=warmup,
         mask_key="mask_visible_tgt",
         log_every=5,
         callback=callback,
+        stage3=stage3,
+        depth_correction=depth_correction,
     )
     steady = timings[len(timings) // 2 :]
     return {
@@ -425,5 +429,6 @@ def throughput_check(predictor, loader, steps, out_dir):
         "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
         "first_total": history[0]["total"],
         "last_total": history[-1]["total"],
+        "last": history[-1],
         "finite": all(math.isfinite(entry["total"]) for entry in history),
     }

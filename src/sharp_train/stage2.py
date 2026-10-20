@@ -77,14 +77,24 @@ class PerceptualMetrics:
             "dists": float(self.dists(rendered, target)),
         }
 
+    def region_lpips(self, rendered, target, region):
+        region = region.expand_as(rendered)
+        composited = rendered * region + target * (1.0 - region)
+        return float(self.lpips(composited.clamp(0, 1) * 2 - 1, target.clamp(0, 1) * 2 - 1).mean())
+
 
 def pair_metrics(metrics, rendering_src, rendering_tgt, batch):
     visible = batch["mask_visible_tgt"]
     valid_src = losses.valid_depth_mask(batch["depth_src"])
     valid_tgt = losses.valid_depth_mask(batch["depth_tgt"]) * visible
+    occluded = 1.0 - visible
     row = metrics(rendering_tgt.color, batch["image_tgt"])
     row.update(
         {
+            "lpips_occluded": metrics.region_lpips(
+                rendering_tgt.color, batch["image_tgt"], occluded
+            ),
+            "hole_fraction": float(losses.hole_fraction(rendering_tgt.alpha)),
             "psnr_tgt_visible": psnr(rendering_tgt.color, batch["image_tgt"], visible),
             "color_l1_src": float(
                 losses.color_l1(rendering_src.color, batch["image_src"], torch.ones_like(visible))
@@ -254,13 +264,17 @@ def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius
 
 
 @torch.no_grad()
-def validation_loss(predictor, batches, device):
+def validation_loss(predictor, batches, device, stage3=None, depth_correction=True):
     was_training = predictor.training
     predictor.eval()
     totals = {}
     for batch in batches:
         terms, _, _ = train.forward_pair(
-            predictor, train.to_device(batch, device), mask_key="mask_visible_tgt"
+            predictor,
+            train.to_device(batch, device),
+            mask_key="mask_visible_tgt",
+            stage3=stage3,
+            depth_correction=depth_correction,
         )
         for key, value in terms.items():
             totals[key] = totals.get(key, 0.0) + float(value) / len(batches)

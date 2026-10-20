@@ -19,6 +19,20 @@ class MetricGaussians:
     opacities: torch.Tensor
 
 
+@dataclasses.dataclass
+class TrainingState:
+    aligned_depth: torch.Tensor
+    scale_map: torch.Tensor
+    delta_xy: torch.Tensor
+    base_x: torch.Tensor
+    base_y: torch.Tensor
+
+
+def align_depth(alignment, monodepth, gt_depth, features, enabled):
+    corrected, scale = alignment(monodepth, gt_depth if enabled else None, features)
+    return corrected, scale[:, :1]
+
+
 def build_predictor(checkpoint=None, grad_checkpointing=False):
     params = PredictorParams()
     params.gaussian_decoder.grad_checkpointing = grad_checkpointing
@@ -46,13 +60,17 @@ class GridPredictor(nn.Module):
     def downsample(self, tensor):
         return tensor if self.factor == 1 else F.avg_pool2d(tensor, self.factor)
 
-    def forward(self, image, disparity_factor, depth=None):
+    def forward(self, image, disparity_factor, depth=None, depth_correction=True):
         predictor = self.predictor
         monodepth_output = predictor.monodepth_model(image)
         disparity = self.downsample(monodepth_output.disparity)
         monodepth = disparity_factor[:, None, None, None] / disparity.clamp(min=1e-4, max=1e4)
-        monodepth, _ = predictor.depth_alignment(
-            monodepth, depth, self.downsample(monodepth_output.decoder_features)
+        monodepth, scale_map = align_depth(
+            predictor.depth_alignment,
+            monodepth,
+            depth,
+            self.downsample(monodepth_output.decoder_features),
+            depth_correction,
         )
         init_output = predictor.init_model(self.downsample(image), monodepth)
         image_features = predictor.feature_model(
@@ -60,11 +78,20 @@ class GridPredictor(nn.Module):
             encodings=[self.downsample(feature) for feature in monodepth_output.output_features],
         )
         delta_values = predictor.prediction_head(image_features)
-        return predictor.gaussian_composer(
+        gaussians = predictor.gaussian_composer(
             delta=delta_values,
             base_values=init_output.gaussian_base_values,
             global_scale=init_output.global_scale,
         )
+        base = init_output.gaussian_base_values
+        self.training_state = TrainingState(
+            aligned_depth=monodepth,
+            scale_map=scale_map,
+            delta_xy=delta_values[:, :2],
+            base_x=base.mean_x_ndc,
+            base_y=base.mean_y_ndc,
+        )
+        return gaussians
 
 
 def input_resolution(predictor):
@@ -125,7 +152,7 @@ def fill_invalid_depth(depth):
     return torch.where(valid, depth, fallback.view(-1, 1, 1, 1))
 
 
-def predict(predictor, image, focal_px, depth=None, delta_hook=None):
+def predict(predictor, image, focal_px, depth=None, delta_hook=None, depth_correction=True):
     _, _, height, width = image.shape
     resized = F.interpolate(
         image, size=(INTERNAL_RESOLUTION, INTERNAL_RESOLUTION), mode="bilinear", align_corners=True
@@ -142,7 +169,14 @@ def predict(predictor, image, focal_px, depth=None, delta_hook=None):
         handle = predictor.prediction_head.register_forward_hook(
             lambda _, __, output: delta_hook(output)
         )
-    gaussians_ndc = predictor(resized, focal_px / width, aligned_depth)
+    if isinstance(predictor, GridPredictor):
+        gaussians_ndc = predictor(
+            resized, focal_px / width, aligned_depth, depth_correction=depth_correction
+        )
+    else:
+        gaussians_ndc = predictor(
+            resized, focal_px / width, aligned_depth if depth_correction else None
+        )
     if handle is not None:
         handle.remove()
     return to_metric(gaussians_ndc, focal_px, width, height)

@@ -44,6 +44,7 @@ Each feature in [features/](features/README.md) is one function of `modal_app.py
 | --- | --- |
 | `stage1` | [gradient flow](features/gradient-flow.md), [Apple-weights check](features/apple-weights.md), [overfit](features/overfit.md) |
 | `stage2-checks`, `stage2-train`, `stage2-eval` | [stage 2 smoke](features/stage2-smoke.md) |
+| `stage3 --mode check`, `stage3 --mode train`, `stage3 --mode eval` | [stage 3 losses](features/stage3.md) |
 
 ## Evidence
 
@@ -63,6 +64,16 @@ Proof standard: read the report and open the images. A pass in JSON with renders
 
 `modal run` stops the app when the function returns. Confirm with `modal app list` that `ml-sharp-train` is stopped. If a detached run is still going and you started it, `modal app stop ml-sharp-train`. Never delete `/vol/runs`: it is the evidence. `./runs/` locally is scratch.
 
+## CPU checks
+
+Stage 3 losses are also checked on CPU, without a GPU and without gsplat, at tiny shapes. From the repo root, with `torch`, `torchvision`, `timm`, `scipy` and `plyfile` installed:
+
+```
+PYTHONPATH=src python -m sharp_train.stage3
+```
+
+The JSON line has `"passed"` at the top. It checks that each new loss is finite and has a gradient, that alpha and perceptual respond to novel-view pixels outside the visibility mask, that the hole fraction equals the share of alpha below 0.5, and that the depth-correction module changes depth only when it is enabled. This does not replace the Modal run.
+
 ## Helpers
 
-None beyond `modal_app.py` and `scripts/prepare_hypersim.py`. The checks live in `src/sharp_train/checks.py`.
+None beyond `modal_app.py` and `scripts/prepare_hypersim.py`. The GPU checks live in `src/sharp_train/checks.py`. The stage 3 CPU checks live in `src/sharp_train/stage3.py`.
