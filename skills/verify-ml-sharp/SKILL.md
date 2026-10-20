@@ -1,6 +1,6 @@
 ---
 name: verify-ml-sharp
-description: Verify the SHARP training loop in DGFX/ml-sharp on Modal. Surface is the Modal app `ml-sharp-train` driven by `modal run modal_app.py`; it runs the stage 1 checks (gradient flow, Apple-weights loss, single-pair overfit) and the stage 2 smoke on real Hypersim pairs. Use after any change to src/sharp_train, src/sharp, modal_app.py or scripts/prepare_hypersim.py, before merging, or when asked to verify ml-sharp.
+description: Verify the SHARP training loop in DGFX/ml-sharp on Modal. Surface is the Modal app `ml-sharp-train` driven by `modal run modal_app.py`; it runs the stage 1 checks (gradient flow, Apple-weights loss, single-pair overfit) and the stage 2 checks, training and per-checkpoint eval on real Hypersim pairs. Use after any change to src/sharp_train, src/sharp, modal_app.py or scripts/prepare_hypersim.py, before merging, or when asked to verify ml-sharp.
 ---
 
 # Verify ml-sharp
@@ -43,7 +43,7 @@ Each feature in [features/](features/README.md) is one function of `modal_app.py
 | Task | Feature |
 | --- | --- |
 | `stage1` | [gradient flow](features/gradient-flow.md), [Apple-weights check](features/apple-weights.md), [overfit](features/overfit.md) |
-| `stage2-train`, `stage2-eval` | [stage 2 smoke](features/stage2-smoke.md) |
+| `stage2-checks`, `stage2-train`, `stage2-eval` | [stage 2 smoke](features/stage2-smoke.md) |
 
 ## Evidence
 
