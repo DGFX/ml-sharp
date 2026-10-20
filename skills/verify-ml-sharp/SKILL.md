@@ -66,13 +66,14 @@ Proof standard: read the report and open the images. A pass in JSON with renders
 
 ## CPU checks
 
-Stage 3 losses are also checked on CPU, without a GPU and without gsplat, at tiny shapes. From the repo root, with `torch`, `torchvision`, `timm`, `scipy` and `plyfile` installed:
+Stage 3 is also checked on CPU, without a GPU and without gsplat, on Apple's weights and real Hypersim pairs. Prepare the eval scenes and the validation scene once, then run the check from the repo root after `uv pip install -e ".[train]"`:
 
 ```
-PYTHONPATH=src python -m sharp_train.stage3
+python scripts/prepare_hypersim.py --out ~/data/hypersim-cpu --scenes ai_005_001 ai_007_001 ai_011_001 --frames 40
+PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
 ```
 
-The JSON line has `"passed"` at the top. It checks that each new loss is finite and has a gradient, that alpha and perceptual respond to novel-view pixels outside the visibility mask, that the hole fraction equals the share of alpha below 0.5, and that depth correction is the identity at init. It also checks that the scale regularizer plus second-layer TV move a ground-truth scale off the ground truth, and that `hold_depth_alignment` (what stage 3 training calls) leaves that depth and the base Gaussian depth unchanged. Perceptual weight 3 has to dominate the total, and the global grad clip is 1. This does not replace the Modal run.
+The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use. `"passed"` is at the top of the report. On the first validation pair at grid 192, the default stage 3 training forward has to give the same Gaussians as the eval `inference` setting, bit for bit, with a scale map of 1. The alignment gets no gradient and the decoder does. With `--depth-correction 1`, the alignment gets a gradient through the stage 3 regularizers. The split has to keep the validation scene out of eval and train, every eval and validation pair has to load, and the eager perceptual gradient has to match a full backward. Alpha BCE, the perceptual loss on a render, the clip statistics and `hole_fraction_frustum` need gsplat, so they are covered only by the Modal check and eval.
 
 Multi-grid finetune of the stage 3 run 2 checkpoint is checked on CPU the same way, still without a GPU and without gsplat. The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use (about 2.7 GB). A grid-192 decoder state is then loaded at grid 384:
 

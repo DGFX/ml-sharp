@@ -189,18 +189,6 @@ def stage1(
     return {"passed": report["passed"], "out_dir": str(out_dir)}
 
 
-def held_out_split(train_scenes):
-    from sharp_train import stage2
-
-    spec = stage2.eval_spec()
-    all_scenes = sorted(
-        {pair["scene"] for pair in json.loads((DATA_ROOT / "pairs.json").read_text())}
-    )
-    scenes = train_scenes.split(",") if train_scenes else all_scenes
-    scenes = [scene for scene in scenes if scene not in spec["scenes"]]
-    return spec, scenes
-
-
 def train_loader(scenes, seed):
     import torch
     from sharp_train.data import HypersimPairs
@@ -234,7 +222,7 @@ def stage2_checks(
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
     checkpoint = ensure_checkpoint()
-    spec, scenes = held_out_split(train_scenes)
+    spec, _, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     eval_set = HypersimPairs(DATA_ROOT, names=spec["pairs"])
     report = {"gpu": torch.cuda.get_device_name(), "train_scenes": scenes}
     report["visibility"] = checks.visibility_check(eval_set, range(len(eval_set)))
@@ -295,6 +283,7 @@ def stage2_train(
     seed: int,
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
+    grad_clip: float = 1000.0,
 ):
     import torch
     from sharp_train import stage2, train, viz
@@ -302,9 +291,9 @@ def stage2_train(
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
     checkpoint = ensure_checkpoint()
-    spec, scenes = held_out_split(train_scenes)
+    _, val, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     train_set, loader = train_loader(scenes, seed)
-    validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
+    validation = stage2.validation_batches(DATA_ROOT, val["pairs"])
     torch.manual_seed(seed)
     predictor = stage2.build_grid_predictor(
         checkpoint,
@@ -317,7 +306,8 @@ def stage2_train(
         "input_resolution": predictor.input_resolution,
         "train_scenes": scenes,
         "train_pairs": len(train_set),
-        "validation_pairs": spec["validation_pairs"],
+        "validation_scene": val["scene"],
+        "validation_pairs": val["pairs"],
         "steps": steps,
         "lr": lr,
         "warmup": warmup,
@@ -325,6 +315,7 @@ def stage2_train(
         "gpu": torch.cuda.get_device_name(),
         "grad_checkpointing": bool(grad_checkpointing),
         "backbone_bf16": bool(backbone_bf16),
+        "grad_clip": grad_clip,
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
     val_history = [{"step": 0, **stage2.validation_loss(predictor, validation, device)}]
@@ -356,6 +347,7 @@ def stage2_train(
         log_every=50,
         max_seconds=max_minutes * 60,
         callback=callback,
+        grad_clip=grad_clip,
     )
     viz.save_curve(
         history,
@@ -460,11 +452,12 @@ def stage3_check(
     depth_correction: int,
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
+    grad_clip: float = 1000.0,
 ):
     import math
 
     import torch
-    from sharp_train import checks, stage3
+    from sharp_train import checks, stage2, stage3
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
@@ -477,7 +470,7 @@ def stage3_check(
         grad_checkpointing=bool(grad_checkpointing),
         backbone_bf16=bool(backbone_bf16),
     )
-    _, scenes = held_out_split(train_scenes)
+    _, _, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     _, loader = train_loader(scenes, 0)
     loss = stage3.Stage3Loss(device)
     report = checks.throughput_check(
@@ -489,6 +482,7 @@ def stage3_check(
         depth_correction=bool(depth_correction),
         lr=1.6e-4,
         warmup=5,
+        grad_clip=grad_clip,
     )
     keys = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale", "total"]
     report["losses_finite"] = all(math.isfinite(report["last"][key]) for key in keys)
@@ -504,6 +498,9 @@ def stage3_check(
             {
                 "seconds_per_step": report["seconds_per_step"],
                 "peak_memory_gb": report["peak_memory_gb"],
+                "grad_clip": report["grad_clip"],
+                "grad_norm_max": report["grad_norm_max"],
+                "clipped_fraction": report["clipped_fraction"],
                 "passed": report["passed"],
                 "last": report["last"],
             }
@@ -534,6 +531,7 @@ def stage3_train(
     depth_correction: int,
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
+    grad_clip: float = 1000.0,
 ):
     import torch
     from sharp_train import losses, stage2, stage3, train, viz
@@ -541,9 +539,9 @@ def stage3_train(
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
     apple_checkpoint = ensure_checkpoint()
-    spec, scenes = held_out_split(train_scenes)
+    _, val, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     train_set, loader = train_loader(scenes, seed)
-    validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
+    validation = stage2.validation_batches(DATA_ROOT, val["pairs"])
     torch.manual_seed(seed)
     predictor, init_step, init_path = load_stage3_predictor(
         apple_checkpoint,
@@ -560,7 +558,8 @@ def stage3_train(
         "input_resolution": predictor.input_resolution,
         "train_scenes": scenes,
         "train_pairs": len(train_set),
-        "validation_pairs": spec["validation_pairs"],
+        "validation_scene": val["scene"],
+        "validation_pairs": val["pairs"],
         "steps": steps,
         "lr": lr,
         "warmup": warmup,
@@ -569,8 +568,7 @@ def stage3_train(
         "init_checkpoint": str(init_path),
         "init_step": init_step,
         "depth_correction": correction,
-        "hold_depth_alignment": correction,
-        "grad_clip": losses.GRAD_CLIP_NORM,
+        "grad_clip": grad_clip,
         "weights": losses.STAGE3_WEIGHTS,
         "source_grid": predictor.source_grid,
         "scale_prior_ratio": predictor.scale_prior_ratio,
@@ -621,6 +619,7 @@ def stage3_train(
         callback=callback,
         stage3=loss,
         depth_correction=correction,
+        grad_clip=grad_clip,
     )
     curve_keys = ["total", "color_src", "color_tgt", "alpha", "percep", "depth_tgt"]
     viz.save_curve(history, curve_keys, out_dir / "train_curve.png", f"{run_name} train")
@@ -667,9 +666,10 @@ def main(
     gpu: str = "",
     timeout_minutes: float = 0,
     init_checkpoint: str = STAGE3_INIT,
-    depth_correction: int = 1,
+    depth_correction: int = 0,
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
+    grad_clip: float = 1000.0,
 ):
     minutes = resolved_max_minutes(max_minutes, grid)
     if task == "stage1":
@@ -704,6 +704,7 @@ def main(
                 seed,
                 grad_checkpointing,
                 backbone_bf16,
+                grad_clip,
             )
         )
     if task == "stage2-eval":
@@ -725,6 +726,7 @@ def main(
                     depth_correction,
                     grad_checkpointing,
                     backbone_bf16,
+                    grad_clip,
                 )
             )
         elif mode == "train":
@@ -746,6 +748,7 @@ def main(
                     depth_correction,
                     grad_checkpointing,
                     backbone_bf16,
+                    grad_clip,
                 )
             )
         elif mode == "eval":
