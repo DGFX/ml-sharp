@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -22,10 +24,24 @@ SCALE_TV_LEVELS = 6
 GRAD_CLIP_NORM = 1.0
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+PAPER_PEAK_LR = 1.6e-4
+PAPER_WARMUP = 10_000
+PAPER_FINAL_RATIO = 0.1
 
 
 def clip_gradients(parameters):
     return torch.nn.utils.clip_grad_norm_(parameters, GRAD_CLIP_NORM)
+
+
+def cosine_lr(step, total, peak, warmup, final_ratio=PAPER_FINAL_RATIO):
+    if step < warmup:
+        return peak * (step + 1) / warmup
+    progress = (step - warmup) / max(1, total - warmup)
+    return peak * (final_ratio + (1 - final_ratio) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def imagenet_normalize(image, mean, std):
+    return (image - mean) / std
 
 
 def masked_mean(values, mask):
@@ -158,6 +174,14 @@ def gram_matrix(features):
     return matrix @ matrix.transpose(1, 2) / (height * width)
 
 
+def feature_gram_loss(rendered, target):
+    batch = rendered.shape[0]
+    channels, height, width = rendered.shape[1:]
+    feature = (rendered - target).square().sum() / (channels * height * width * batch)
+    gram = (gram_matrix(rendered) - gram_matrix(target)).square().sum()
+    return feature + 10.0 * gram / (channels * channels * batch)
+
+
 class PerceptualLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -174,7 +198,7 @@ class PerceptualLoss(nn.Module):
 
     def features(self, image):
         self.eval()
-        value = (image.clamp(0, 1) - self.mean) / self.std
+        value = imagenet_normalize(image.clamp(0, 1), self.mean, self.std)
         value = self.network.relu(self.network.bn1(self.network.conv1(value)))
         value = self.network.maxpool(value)
         layers = []
@@ -193,15 +217,8 @@ class PerceptualLoss(nn.Module):
             target_layers = self.features(target)
         rendered_layers = self.features(rendered)
         total = rendered.new_zeros(())
-        batch = rendered.shape[0]
         for rendered_layer, target_layer in zip(rendered_layers, target_layers, strict=True):
-            channels, height, width = rendered_layer.shape[1:]
-            feature = (rendered_layer - target_layer).square().sum() / (
-                channels * height * width * batch
-            )
-            gram = (gram_matrix(rendered_layer) - gram_matrix(target_layer)).square().sum()
-            gram = gram / (channels * channels * batch)
-            total = total + feature + 10.0 * gram
+            total = total + feature_gram_loss(rendered_layer, target_layer)
         return total
 
     def forward(self, rendered, target):

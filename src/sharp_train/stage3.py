@@ -329,6 +329,135 @@ def _full_view_check(perceptual):
     }
 
 
+def _schedule_check():
+    peak = losses.PAPER_PEAK_LR
+    warmup = losses.PAPER_WARMUP
+    total = 100_000
+    step0 = losses.cosine_lr(0, total, peak, warmup)
+    step499 = losses.cosine_lr(499, total, peak, warmup)
+    step9999 = losses.cosine_lr(warmup - 1, total, peak, warmup)
+    step10000 = losses.cosine_lr(warmup, total, peak, warmup)
+    end = losses.cosine_lr(total - 1, total, peak, warmup)
+    short = losses.cosine_lr(499, 8000, peak, 300)
+    probe = losses.cosine_lr(3999, 4000, peak, warmup)
+    return {
+        "step0": step0,
+        "step499": step499,
+        "step9999": step9999,
+        "step10000": step10000,
+        "final": end,
+        "warmup300_step499": short,
+        "probe_step3999": probe,
+        "starts_at_peak_over_warmup": math.isclose(step0, peak / warmup),
+        "still_ramping_at_499": math.isclose(step499, peak * 500 / warmup) and step499 < 0.1 * peak,
+        "reaches_peak_at_end_of_warmup": math.isclose(step9999, peak),
+        "cosine_continuous_at_warmup": math.isclose(step10000, peak, rel_tol=1e-6),
+        "cosine_ends_at_final": math.isclose(end, peak * losses.PAPER_FINAL_RATIO, rel_tol=1e-3),
+        "short_warmup_at_peak_by_499": short > 0.9 * peak,
+        "probe_stays_on_ramp": math.isclose(probe, peak * 4000 / warmup),
+    }
+
+
+def _alpha_target_check(perceptual):
+    color = torch.rand(1, 3, 32, 32) * 0.4 + 0.3
+    src_alpha = torch.full((1, 1, 32, 32), 0.55)
+    novel_alpha = torch.full((1, 1, 32, 32), 0.2)
+    raised_alpha = torch.full((1, 1, 32, 32), 0.85)
+    state = _state()
+    gaussians = _gaussians()
+    intrinsics = torch.tensor([[100.0, 0.0, 16.0], [0.0, 100.0, 16.0], [0.0, 0.0, 1.0]]).view(
+        1, 3, 3
+    )
+    batch = {"image_tgt": color, "intrinsics": intrinsics}
+    with torch.no_grad():
+        base = losses.stage3_terms(
+            _view(color, src_alpha),
+            _view(color, novel_alpha),
+            batch,
+            gaussians,
+            state,
+            perceptual,
+        )["alpha"]
+        raised = losses.stage3_terms(
+            _view(color, src_alpha),
+            _view(color, raised_alpha),
+            batch,
+            gaussians,
+            state,
+            perceptual,
+        )["alpha"]
+    expected = losses.alpha_bce(src_alpha) + losses.alpha_bce(novel_alpha)
+    manual = torch.nn.functional.binary_cross_entropy(
+        novel_alpha.clamp(1e-4, 1.0 - 1e-4), torch.ones_like(novel_alpha)
+    )
+    return {
+        "base": float(base),
+        "raised": float(raised),
+        "wired_to_both_views": bool(torch.allclose(base, expected)),
+        "matches_bce_against_one": bool(torch.allclose(losses.alpha_bce(novel_alpha), manual)),
+        "raising_novel_alpha_lowers_loss": bool(raised < base),
+    }
+
+
+def _hinge_check():
+    zero = losses.splat_hinge(torch.zeros(4))
+    upper = losses.splat_hinge(torch.tensor([losses.SPLAT_MAX + 0.48]))
+    inside = losses.splat_hinge(torch.tensor([1.0]))
+    at_limit = losses.offset_hinge(torch.full((3, 2), losses.OFFSET_LIMIT))
+    at_zero = losses.offset_hinge(torch.zeros(3, 2))
+    past = losses.offset_hinge(torch.full((3, 2), losses.OFFSET_LIMIT + 100))
+    return {
+        "zero_variance": float(zero),
+        "upper": float(upper),
+        "offset_past": float(past),
+        "zero_variance_is_lower_cap": bool(torch.allclose(zero, torch.tensor(losses.SPLAT_MIN))),
+        "upper_hinge_is_048": math.isclose(float(upper), 0.48, abs_tol=1e-5),
+        "inside_band_is_zero": float(inside) == 0.0,
+        "offset_dead_zone": float(at_limit) == 0.0 and float(at_zero) == 0.0,
+        "offset_fires_past_400": float(past) > 0,
+    }
+
+
+def _perceptual_scale_check(perceptual):
+    torch.manual_seed(1)
+    rendered = torch.randn(2, 4, 8, 8)
+    target = torch.randn(2, 4, 8, 8)
+    got = losses.feature_gram_loss(rendered, target)
+    batch, channels, height, width = rendered.shape
+    feature = (rendered - target).square().sum() / (channels * height * width * batch)
+
+    def gram(value):
+        matrix = value.flatten(2)
+        return matrix @ matrix.transpose(1, 2) / (height * width)
+
+    gram = 10.0 * (gram(rendered) - gram(target)).square().sum() / (channels * channels * batch)
+    mean = torch.tensor(losses.IMAGENET_MEAN).view(1, 3, 1, 1)
+    std = torch.tensor(losses.IMAGENET_STD).view(1, 3, 1, 1)
+    image = torch.full((1, 3, 2, 2), 0.5)
+    normalized = losses.imagenet_normalize(image, mean, std)
+    constant = torch.full((1, 3, 32, 32), 0.5)
+    with torch.no_grad():
+        before = perceptual.features(constant)[-1].clone()
+        saved_mean = perceptual.mean.clone()
+        saved_std = perceptual.std.clone()
+        perceptual.mean.zero_()
+        perceptual.std.fill_(1)
+        after = perceptual.features(constant)[-1]
+        perceptual.mean.copy_(saved_mean)
+        perceptual.std.copy_(saved_std)
+    return {
+        "feature_gram_matches_paper": bool(torch.allclose(got, feature + gram)),
+        "identical_features_are_zero": bool(
+            losses.feature_gram_loss(rendered, rendered).item() == 0.0
+        ),
+        "imagenet_mean_maps_to_zero": bool(
+            torch.allclose(losses.imagenet_normalize(mean, mean, std), torch.zeros_like(mean))
+        ),
+        "half_uses_imagenet_stats": bool(torch.allclose(normalized, (0.5 - mean) / std)),
+        "normalization_changes_features": bool(not torch.allclose(before, after)),
+    }
+
+
 def cpu_checks():
     regularizers = _regularizer_checks()
     perceptual = losses.PerceptualLoss()
@@ -339,6 +468,10 @@ def cpu_checks():
     holes = _hole_fraction_check()
     depth = _depth_correction_check()
     scaling = _loss_scale_check()
+    schedule = _schedule_check()
+    alpha_target = _alpha_target_check(perceptual)
+    hinges = _hinge_check()
+    perceptual_scale = _perceptual_scale_check(perceptual)
     loss_names = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale"]
     criteria = {
         f"{name} finite with gradient": regularizers[name]["finite"]
@@ -385,12 +518,44 @@ def cpu_checks():
     criteria["global grad clip is 1"] = bool(
         scaling["clips_to_one"] and scaling["grad_clip"] == 1.0
     )
+    criteria["paper warmup reaches 1.6e-4 at step 10000"] = bool(
+        schedule["starts_at_peak_over_warmup"]
+        and schedule["still_ramping_at_499"]
+        and schedule["reaches_peak_at_end_of_warmup"]
+        and schedule["cosine_continuous_at_warmup"]
+        and schedule["cosine_ends_at_final"]
+        and schedule["short_warmup_at_peak_by_499"]
+        and schedule["probe_stays_on_ramp"]
+    )
+    criteria["alpha bce targets 1 on the novel view"] = bool(
+        alpha_target["wired_to_both_views"]
+        and alpha_target["matches_bce_against_one"]
+        and alpha_target["raising_novel_alpha_lowers_loss"]
+    )
+    criteria["splat loss above 0.1 is the upper hinge"] = bool(
+        hinges["zero_variance_is_lower_cap"]
+        and hinges["upper_hinge_is_048"]
+        and hinges["inside_band_is_zero"]
+        and hinges["offset_dead_zone"]
+        and hinges["offset_fires_past_400"]
+    )
+    criteria["perceptual scaling matches appendix A.2"] = bool(
+        perceptual_scale["feature_gram_matches_paper"]
+        and perceptual_scale["identical_features_are_zero"]
+        and perceptual_scale["imagenet_mean_maps_to_zero"]
+        and perceptual_scale["half_uses_imagenet_stats"]
+        and perceptual_scale["normalization_changes_features"]
+    )
     return {
         "regularizers": regularizers,
         "full_view": full_view,
         "hole_fraction": holes,
         "depth_correction": depth,
         "loss_scale": scaling,
+        "schedule": schedule,
+        "alpha_target": alpha_target,
+        "hinges": hinges,
+        "perceptual_scale": perceptual_scale,
         "criteria": criteria,
         "passed": all(criteria.values()),
     }
@@ -410,6 +575,10 @@ def main():
         "hole_fraction": report["hole_fraction"],
         "depth_correction": report["depth_correction"],
         "loss_scale": report["loss_scale"],
+        "schedule": report["schedule"],
+        "alpha_target": report["alpha_target"],
+        "hinges": report["hinges"],
+        "perceptual_scale": report["perceptual_scale"],
     }
     print(json.dumps(printable, indent=1), flush=True)
     if not report["passed"]:

@@ -1,5 +1,4 @@
 import json
-import math
 import time
 from pathlib import Path
 
@@ -39,13 +38,6 @@ def forward_pair(
         )
         terms = losses.add_stage3(terms, extra)
     return terms, rendering_src, rendering_tgt
-
-
-def cosine_lr(step, total, peak, warmup, final_ratio=0.1):
-    if step < warmup:
-        return peak * (step + 1) / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    return peak * (final_ratio + (1 - final_ratio) * 0.5 * (1 + math.cos(math.pi * progress)))
 
 
 def summarize(terms):
@@ -88,7 +80,7 @@ def train(
             batch = next(iterator)
         batch = to_device(batch, device)
         for group in optimizer.param_groups:
-            group["lr"] = cosine_lr(step, steps, lr, warmup)
+            group["lr"] = losses.cosine_lr(step, steps, lr, warmup)
         terms, _, _ = forward_pair(
             predictor,
             batch,

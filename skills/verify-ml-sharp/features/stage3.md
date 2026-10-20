@@ -18,21 +18,21 @@ PYTHONPATH=src python -m sharp_train.stage3
 
 ```
 PYTHONPATH=src python -m sharp_train.stage3
-modal run modal_app.py --task stage3 --mode check --run-name stage3-check-<sha>
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --steps 8000 --max-minutes 90 --timeout-minutes 120
-modal run modal_app.py --task stage3 --mode eval --run-name stage3-<sha> --checkpoints final
+modal run modal_app.py --task stage3 --mode check --run-name stage3b-check-<sha> --init stage2
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3b-<sha> --init stage2 --steps 4000 --stage3-warmup 10000 --max-minutes 35 --timeout-minutes 45
+modal run modal_app.py --task stage3 --mode eval --run-name stage3b-<sha> --checkpoints final --timeout-minutes 20
 ```
 
 `A100-80GB` when 40 GB is tight:
 
 ```
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --gpu A100-80GB --steps 8000 --max-minutes 90 --timeout-minutes 120
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --gpu A100-80GB --init stage2 --steps 8000 --stage3-warmup 10000 --max-minutes 90 --timeout-minutes 120
 STAGE3_GPU=A100-80GB modal run modal_app.py --task stage3 --mode check --run-name stage3-check-<sha>
 ```
 
 ## Driving it with modal
 
-`--mode` is `check`, `train` or `eval`. `--init-checkpoint` defaults to `runs/stage2-29fefbe/checkpoints/final.pt` on the volume. `--depth-correction 0` turns the scale map off. `--gpu` or `STAGE3_GPU` overrides `A100-40GB`. `--timeout-minutes` overrides the function timeout (45 min check, 120 min train, 60 min eval). Train also takes `--grid`, `--steps`, `--lr`, `--warmup`, `--max-minutes`, `--checkpoint-every`, `--val-every`, `--seed`, `--train-scenes`. Eval takes `--checkpoints`.
+`--mode` is `check`, `train` or `eval`. `--init stage2` (default) loads `runs/stage2-29fefbe/checkpoints/final.pt`. `--init stage3b` loads `runs/stage3-b29749e/checkpoints/final.pt`. A non-empty `--init-checkpoint` overrides `--init`. `--stage3-warmup` defaults to 10000 (paper). `--warmup` is the stage 2 schedule and stage 3 does not read it. `--depth-correction 0` turns the scale map off. `--gpu` or `STAGE3_GPU` overrides `A100-40GB`. `--timeout-minutes` overrides the function timeout (45 min check, 120 min train, 60 min eval). Train also takes `--grid`, `--steps`, `--lr`, `--max-minutes`, `--checkpoint-every`, `--val-every`, `--seed`, `--train-scenes`. Eval takes `--checkpoints`. The budget-capped probe is 4000 steps from stage 2: about $1.00 of training at $0.25/1000 steps, plus an eval timeout of 20 minutes (about $0.70 on an A100-40GB). The whole run stays under about $1.80 even if eval hits that timeout. Those 4000 steps stay on the linear ramp and finish at 6.4e-5.
 
 ## Evidence
 
@@ -46,5 +46,6 @@ STAGE3_GPU=A100-80GB modal run modal_app.py --task stage3 --mode check --run-nam
 - The novel-view color loss is still masked. Only alpha and perceptual see the holes. A drop in `hole_fraction` and `lpips_occluded` is the signal that disocclusions are filling in; full-image LPIPS can lag behind.
 - Depth correction is on by default and is already what stage 2 trained. Turning it off is an ablation, not the starting point. Stage 3 freezes that module (`hold_depth_alignment`) so the scale regularizer and the second-layer TV cannot push the stage 2 scale off the ground truth. The scale losses stay in the total at the paper weights.
 - `history.json` `grad_norm` is the norm before `clip_grad_norm_` at 1.0. `train_meta.json` gets `peak_memory_gb` during the loop.
+- Stage 3 warmup is 10,000 steps. The held run used 300, so by step 500 the learning rate was already at the peak while perceptual loss was most of the total. That enlarged splats past variance 100 (splat loss 0.48 is the upper hinge; the lower hinge cannot exceed 0.1) and raised val color L1. Start the next run from `--init stage2`.
 - The perceptual net is an ImageNet ResNet-50, baked into the Modal image. The paper's inpainting ResNet-50 is not used. See `docs/training-spec.md`.
 - Checkpoints still exclude monodepth weights and inherit Apple's research-only model license. Renders are Hypersim: credit Hypersim (CC BY-SA 3.0).

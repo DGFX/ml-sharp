@@ -83,7 +83,20 @@ def volume_path(path):
     return path if path.is_absolute() else VOLUME_ROOT / path
 
 
-STAGE3_INIT = "runs/stage2-29fefbe/checkpoints/final.pt"
+STAGE3_INITS = {
+    "stage2": "runs/stage2-29fefbe/checkpoints/final.pt",
+    "stage3b": "runs/stage3-b29749e/checkpoints/final.pt",
+}
+STAGE3_WARMUP = 10_000
+
+
+def resolve_stage3_init(init, init_checkpoint):
+    if init_checkpoint:
+        return init_checkpoint
+    if init not in STAGE3_INITS:
+        known = ", ".join(sorted(STAGE3_INITS))
+        raise ValueError(f"unknown stage3 init {init}; choose {known} or pass --init-checkpoint")
+    return STAGE3_INITS[init]
 
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
@@ -572,8 +585,10 @@ def main(
     mode: str = "check",
     gpu: str = "",
     timeout_minutes: float = 0,
-    init_checkpoint: str = STAGE3_INIT,
+    init_checkpoint: str = "",
     depth_correction: int = 1,
+    init: str = "stage2",
+    stage3_warmup: int = STAGE3_WARMUP,
 ):
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
@@ -602,12 +617,14 @@ def main(
         if timeout_minutes:
             options["timeout"] = int(timeout_minutes * 60)
         if mode == "check":
+            resolved_init = resolve_stage3_init(init, init_checkpoint)
             print(
                 stage3_check.with_options(**options).remote(
-                    run_name, train_scenes, grid, init_checkpoint, depth_correction
+                    run_name, train_scenes, grid, resolved_init, depth_correction
                 )
             )
         elif mode == "train":
+            resolved_init = resolve_stage3_init(init, init_checkpoint)
             print(
                 stage3_train.with_options(**options).remote(
                     run_name,
@@ -615,12 +632,12 @@ def main(
                     grid,
                     steps,
                     lr,
-                    warmup,
+                    stage3_warmup,
                     max_minutes,
                     checkpoint_every,
                     val_every,
                     seed,
-                    init_checkpoint,
+                    resolved_init,
                     depth_correction,
                 )
             )
