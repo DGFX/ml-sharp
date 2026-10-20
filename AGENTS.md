@@ -24,7 +24,7 @@ These are our stages, not the paper's two-stage curriculum.
 | --- | --- | --- |
 | 1 | Prove the training loop: view-pair loader, forward, gsplat render in both views, L1 on color and disparity. Gradient check, Apple-weights check, overfit check. | `skills/verify-ml-sharp` |
 | 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks`, then `--task stage2-train`, then `--task stage2-eval` |
-| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Default GPU `A100-40GB`, override with `--gpu A100-80GB` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check`, then `--mode train`, then `--mode eval` |
+| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Finetune the stage 3 run 2 checkpoint at grid 384 (`A100-40GB`) or 768 (`H100`). Override the GPU with `--gpu` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check`, then `--mode train`, then `--mode eval` |
 
 ## Where things run
 
@@ -36,7 +36,7 @@ These are our stages, not the paper's two-stage curriculum.
 
 ## Budget rules
 
-- Modal GPU spend is capped by Dominik per task. Stage 1 and 2 run on `A100-40GB` ($2.10/h). Do not pick an 80 GB GPU before stage 3.
+- Modal GPU spend is capped by Dominik per task. Stage 1 and 2 run on `A100-40GB` ($2.10/h). Stage 3 stays on `A100-40GB` at grid 192 and 384. Grid 768 defaults to `H100`.
 - Every Modal function sets `timeout`. Detached runs (`modal run --detach`) only with a timeout and a `max_minutes` budget inside the loop.
 - Never leave an app running. After a run, `modal app list` must show nothing running for `ml-sharp-train`.
 - Check spend with `modal billing report` before and after a run.

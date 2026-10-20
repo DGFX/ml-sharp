@@ -48,13 +48,38 @@ def build_predictor(checkpoint=None, grad_checkpointing=False):
     params.gaussian_decoder.grad_checkpointing = grad_checkpointing
     predictor = create_predictor(params)
     if checkpoint is not None:
-        state_dict = torch.load(checkpoint, weights_only=True, map_location="cpu")
+        state_dict = torch.load(checkpoint, weights_only=True, map_location="cpu", mmap=True)
         predictor.load_state_dict(state_dict)
+        del state_dict
     return predictor
 
 
+def cast_floating(value):
+    if torch.is_tensor(value):
+        return value.float() if value.is_floating_point() else value
+    if isinstance(value, dict):
+        return {key: cast_floating(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [cast_floating(item) for item in value]
+    if isinstance(value, tuple):
+        casted = [cast_floating(item) for item in value]
+        if hasattr(value, "_fields"):
+            return type(value)(*casted)
+        return tuple(casted)
+    return value
+
+
+def apply_backbone(module, fn, *args):
+    if not getattr(module, "backbone_bf16", False):
+        return fn(*args)
+    device_type = args[0].device.type if torch.is_tensor(args[0]) else "cpu"
+    with torch.no_grad(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        output = fn(*args)
+    return cast_floating(output)
+
+
 class GridPredictor(nn.Module):
-    def __init__(self, predictor, grid):
+    def __init__(self, predictor, grid, backbone_bf16=False):
         super().__init__()
         if grid > FULL_GRID or FULL_GRID % grid:
             raise ValueError(f"grid {grid} must divide {FULL_GRID}")
@@ -62,6 +87,9 @@ class GridPredictor(nn.Module):
         self.grid = grid
         self.factor = FULL_GRID // grid
         self.input_resolution = INTERNAL_RESOLUTION // self.factor
+        self.backbone_bf16 = backbone_bf16
+        self.source_grid = grid
+        self.scale_prior_ratio = 1.0
 
     @property
     def prediction_head(self):
@@ -70,9 +98,12 @@ class GridPredictor(nn.Module):
     def downsample(self, tensor):
         return tensor if self.factor == 1 else F.avg_pool2d(tensor, self.factor)
 
+    def backbone(self, image):
+        return apply_backbone(self, self.predictor.monodepth_model, image)
+
     def forward(self, image, disparity_factor, depth=None, depth_correction=True):
         predictor = self.predictor
-        monodepth_output = predictor.monodepth_model(image)
+        monodepth_output = self.backbone(image)
         disparity = self.downsample(monodepth_output.disparity)
         monodepth = disparity_factor[:, None, None, None] / disparity.clamp(min=1e-4, max=1e4)
         monodepth, scale_map = align_depth(
@@ -102,6 +133,35 @@ class GridPredictor(nn.Module):
             base_y=base.mean_y_ndc,
         )
         return gaussians
+
+
+def resolution_for_grid(grid):
+    return INTERNAL_RESOLUTION * grid // FULL_GRID
+
+
+def median_base_scale(initializer, resolution):
+    image = torch.zeros(1, 3, resolution, resolution)
+    depth = torch.ones(1, 2, resolution, resolution)
+    with torch.no_grad():
+        scales = initializer(image, depth).gaussian_base_values.scales
+    return scales.median()
+
+
+def rescale_base_scale(grid_predictor, source_grid):
+    target_grid = grid_predictor.grid
+    ratio = source_grid / float(target_grid)
+    grid_predictor.source_grid = source_grid
+    grid_predictor.scale_prior_ratio = ratio
+    if source_grid == target_grid:
+        return ratio
+    initializer = grid_predictor.predictor.init_model
+    source_scale = median_base_scale(initializer, resolution_for_grid(source_grid))
+    target_scale = median_base_scale(initializer, grid_predictor.input_resolution)
+    measured = float(target_scale / source_scale)
+    correction = ratio / measured
+    if abs(correction - 1.0) > 1e-3:
+        initializer.scale_factor = float(initializer.scale_factor) * correction
+    return ratio
 
 
 def input_resolution(predictor):

@@ -74,7 +74,15 @@ Occluded LPIPS composites the render with the ground truth outside the occluded 
 
 ## Stage 3
 
-`modal run modal_app.py --task stage3 --mode check|train|eval` continues from a stage 2 checkpoint (default `/vol/runs/stage2-29fefbe/checkpoints/final.pt`) at the same grid. The Gaussian decoder is not reset. Monodepth stays frozen. Adam is fresh. The default warmup is the stage 2 short warmup (`--warmup`, default 300), not the paper's 10k from-scratch warmup. `--depth-correction 0` skips the scale map and the two scale losses. `--gpu` or `STAGE3_GPU` selects the GPU (`A100-40GB` default, `A100-80GB` when the perceptual loss does not fit). `--timeout-minutes` overrides the function timeout. `--max-minutes` is the budget inside the train loop.
+`modal run modal_app.py --task stage3 --mode check|train|eval` continues from the stage 3 run 2 checkpoint (default `runs/stage3-b29749e/checkpoints/final.pt`, grid 192). The Gaussian decoder is not reset. Monodepth stays frozen. Adam is fresh. The default warmup is the stage 2 short warmup (`--warmup`, default 300), not the paper's 10k from-scratch warmup. The default learning rate is `1.6e-4` and the default step count is 8000. `--depth-correction 0` skips the scale map and the two scale losses.
+
+`--grid` may be 384 or 768 even though that checkpoint was trained at 192. `stage2.load_checkpoint(..., grid=)` rebuilds the predictor at the requested grid and loads the convolutional decoder weights. The base splat scale follows grid spacing. The initializer sets it from `2 * scale_factor * stride / image_width`, and image width is twice the grid, so a 192 prior becomes 1/2 at 384 and 1/4 at 768. `rescale_base_scale` stores that ratio on the predictor and multiplies `scale_factor` only when the measured median scale disagrees, which keeps a warm start near the 192 quality.
+
+`--grad-checkpointing 1` turns on the Gaussian decoder's gradient checkpointing (`sharp.utils.training.checkpoint_wrapper` inside the multires conv decoder). `--backbone-bf16 1` runs only the frozen Depth Pro forward in bfloat16 autocast and `torch.no_grad`. The decoder, covariances, gsplat and the losses stay FP32. Both flags default off.
+
+An omitted `--max-minutes` is `50 * (grid / 192) ** 2` (50, 200 and 800 at grids 192, 384 and 768). An omitted `--timeout-minutes` scales the Modal function timeout by the same factor from the grid-192 baselines: stage 3 check 45, train 120, eval 60 minutes; stage 2 checks 25, train 80, eval 40 minutes. An explicit value is used as given. The GPU is `A100-40GB` below grid 768 and `H100` at 768. `--gpu` or `STAGE3_GPU` overrides it.
+
+`PYTHONPATH=src python -m sharp_train.multigrid` is the CPU check. It loads a grid-192 decoder checkpoint onto a grid-384 predictor, checks the 294,912-Gaussian count (two layers), the 1/2 and 1/4 scale ratios, non-zero decoder gradients with checkpointing on and off, and no backbone gradient under `--backbone-bf16`.
 
 Color and disparity stay the stage 1/2 rendered L1 (both views, novel view inside the visibility mask, depth weight 0.2). That is not the paper's depth loss, which is input-view, first depth layer only. On top of that total, stage 3 adds the weighted terms below. Logged values are unweighted; the weights go into `total`.
 

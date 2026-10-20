@@ -44,7 +44,7 @@ Each feature in [features/](features/README.md) is one function of `modal_app.py
 | --- | --- |
 | `stage1` | [gradient flow](features/gradient-flow.md), [Apple-weights check](features/apple-weights.md), [overfit](features/overfit.md) |
 | `stage2-checks`, `stage2-train`, `stage2-eval` | [stage 2 smoke](features/stage2-smoke.md) |
-| `stage3 --mode check`, `stage3 --mode train`, `stage3 --mode eval` | [stage 3 losses](features/stage3.md) |
+| `stage3 --mode check`, `stage3 --mode train`, `stage3 --mode eval` | [stage 3 losses](features/stage3.md), [multi-grid finetune](features/multigrid.md) |
 
 ## Evidence
 
@@ -74,6 +74,14 @@ PYTHONPATH=src python -m sharp_train.stage3
 
 The JSON line has `"passed"` at the top. It checks that each new loss is finite and has a gradient, that alpha and perceptual respond to novel-view pixels outside the visibility mask, that the hole fraction equals the share of alpha below 0.5, and that depth correction is the identity at init. It also checks that the scale regularizer plus second-layer TV move a ground-truth scale off the ground truth, and that `hold_depth_alignment` (what stage 3 training calls) leaves that depth and the base Gaussian depth unchanged. Perceptual weight 3 has to dominate the total, and the global grad clip is 1. This does not replace the Modal run.
 
+Multi-grid finetune of the stage 3 run 2 checkpoint is checked on CPU the same way, still without a GPU and without gsplat. The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use (about 2.7 GB). A grid-192 decoder state is then loaded at grid 384:
+
+```
+PYTHONPATH=src python -m sharp_train.multigrid
+```
+
+`"passed"` is at the top. `gaussians` is 294912, two layers of 384 x 384. `scale_384 / scale_192` is 1/2 and `scale_768 / scale_192` is 1/4. Decoder feature and head gradients are non-zero with grad checkpointing on and off, the frozen backbone gradient is 0, and `--backbone-bf16` leaves the backbone with no gradient while an unfrozen block still receives one in FP32. This does not replace a Modal run at grid 384 or 768.
+
 ## Helpers
 
-None beyond `modal_app.py` and `scripts/prepare_hypersim.py`. The GPU checks live in `src/sharp_train/checks.py`. The stage 3 CPU checks live in `src/sharp_train/stage3.py`.
+None beyond `modal_app.py` and `scripts/prepare_hypersim.py`. The GPU checks live in `src/sharp_train/checks.py`. The stage 3 CPU checks live in `src/sharp_train/stage3.py`. The multi-grid CPU checks live in `src/sharp_train/multigrid.py`.
