@@ -14,7 +14,13 @@ def to_device(batch, device):
 
 
 def forward_pair(
-    predictor, batch, mask_key=None, delta_hook=None, stage3=None, depth_correction=True
+    predictor,
+    batch,
+    mask_key=None,
+    delta_hook=None,
+    stage3=None,
+    depth_correction=True,
+    color_mask_key=None,
 ):
     _, _, height, width = batch["image_src"].shape
     gaussians = model.predict(
@@ -26,7 +32,13 @@ def forward_pair(
         depth_correction=depth_correction,
     )
     rendering_src, rendering_tgt = render.render_pair(gaussians, batch, width, height)
-    terms = losses.pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=mask_key)
+    terms = losses.pair_losses(
+        rendering_src,
+        rendering_tgt,
+        batch,
+        tgt_mask_key=mask_key,
+        color_mask_key=color_mask_key,
+    )
     if stage3 is not None:
         extra = losses.stage3_terms(
             rendering_src,
@@ -36,7 +48,7 @@ def forward_pair(
             predictor.training_state,
             stage3.perceptual,
         )
-        terms = losses.add_stage3(terms, extra)
+        terms = losses.add_stage3(terms, extra, getattr(stage3, "weights", None))
     return terms, rendering_src, rendering_tgt
 
 
@@ -52,6 +64,7 @@ def train(
     lr=1.6e-4,
     warmup=100,
     mask_key=None,
+    color_mask_key=None,
     log_every=10,
     snapshot_every=None,
     snapshot_batch=None,
@@ -87,6 +100,7 @@ def train(
             mask_key=mask_key,
             stage3=stage3,
             depth_correction=depth_correction,
+            color_mask_key=color_mask_key,
         )
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
@@ -118,6 +132,7 @@ def train(
                 mask_key,
                 stage3,
                 depth_correction,
+                color_mask_key,
             )
             predictor.train()
         if callback is not None:
@@ -145,10 +160,17 @@ def record_peak_memory(out_dir):
 
 
 @torch.no_grad()
-def snapshot(predictor, batch, path, mask_key=None, stage3=None, depth_correction=True):
+def snapshot(
+    predictor, batch, path, mask_key=None, stage3=None, depth_correction=True, color_mask_key=None
+):
     predictor.eval()
     terms, rendering_src, rendering_tgt = forward_pair(
-        predictor, batch, mask_key=mask_key, stage3=stage3, depth_correction=depth_correction
+        predictor,
+        batch,
+        mask_key=mask_key,
+        stage3=stage3,
+        depth_correction=depth_correction,
+        color_mask_key=color_mask_key,
     )
     viz.save_pair_grid(batch, rendering_src, rendering_tgt, path)
     return summarize(terms)

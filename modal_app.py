@@ -87,7 +87,7 @@ STAGE3_INITS = {
     "stage2": "runs/stage2-29fefbe/checkpoints/final.pt",
     "stage3b": "runs/stage3-b29749e/checkpoints/final.pt",
 }
-STAGE3_WARMUP = 10_000
+STAGE3_WARMUP = 1_000
 
 
 def resolve_stage3_init(init, init_checkpoint):
@@ -394,7 +394,12 @@ def load_stage3_predictor(apple_checkpoint, init_checkpoint, grid, device):
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
 def stage3_check(
-    run_name: str, train_scenes: str, grid: int, init_checkpoint: str, depth_correction: int
+    run_name: str,
+    train_scenes: str,
+    grid: int,
+    init_checkpoint: str,
+    depth_correction: int,
+    percep_weight: float = 3.0,
 ):
     import math
 
@@ -409,7 +414,7 @@ def stage3_check(
     )
     _, scenes = held_out_split(train_scenes)
     _, loader = train_loader(scenes, 0)
-    loss = stage3.Stage3Loss(device)
+    loss = stage3.Stage3Loss(device, percep_weight)
     report = checks.throughput_check(
         predictor,
         loader,
@@ -419,6 +424,7 @@ def stage3_check(
         depth_correction=bool(depth_correction),
         lr=1.6e-4,
         warmup=5,
+        color_mask_key="mask_frustum_tgt",
     )
     keys = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale", "total"]
     report["losses_finite"] = all(math.isfinite(report["last"][key]) for key in keys)
@@ -462,6 +468,7 @@ def stage3_train(
     seed: int,
     init_checkpoint: str,
     depth_correction: int,
+    percep_weight: float = 3.0,
 ):
     import torch
     from sharp_train import losses, stage2, stage3, train, viz
@@ -476,7 +483,7 @@ def stage3_train(
     predictor, init_step, init_path = load_stage3_predictor(
         apple_checkpoint, init_checkpoint, grid, device
     )
-    loss = stage3.Stage3Loss(device)
+    loss = stage3.Stage3Loss(device, percep_weight)
     correction = bool(depth_correction)
     meta = {
         "grid": grid,
@@ -494,14 +501,20 @@ def stage3_train(
         "depth_correction": correction,
         "hold_depth_alignment": correction,
         "grad_clip": losses.GRAD_CLIP_NORM,
-        "weights": losses.STAGE3_WEIGHTS,
+        "weights": loss.weights,
+        "color_mask": "mask_frustum_tgt",
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
     val_history = [
         {
             "step": 0,
             **stage2.validation_loss(
-                predictor, validation, device, stage3=loss, depth_correction=correction
+                predictor,
+                validation,
+                device,
+                stage3=loss,
+                depth_correction=correction,
+                color_mask_key="mask_frustum_tgt",
             ),
         }
     ]
@@ -514,7 +527,12 @@ def stage3_train(
                 {
                     "step": done,
                     **stage2.validation_loss(
-                        predictor, validation, device, stage3=loss, depth_correction=correction
+                        predictor,
+                        validation,
+                        device,
+                        stage3=loss,
+                        depth_correction=correction,
+                        color_mask_key="mask_frustum_tgt",
                     ),
                 }
             )
@@ -535,6 +553,7 @@ def stage3_train(
         lr=lr,
         warmup=warmup,
         mask_key="mask_visible_tgt",
+        color_mask_key="mask_frustum_tgt",
         log_every=50,
         max_seconds=max_minutes * 60,
         callback=callback,
@@ -589,6 +608,7 @@ def main(
     depth_correction: int = 1,
     init: str = "stage2",
     stage3_warmup: int = STAGE3_WARMUP,
+    percep_weight: float = 3.0,
 ):
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
@@ -620,7 +640,7 @@ def main(
             resolved_init = resolve_stage3_init(init, init_checkpoint)
             print(
                 stage3_check.with_options(**options).remote(
-                    run_name, train_scenes, grid, resolved_init, depth_correction
+                    run_name, train_scenes, grid, resolved_init, depth_correction, percep_weight
                 )
             )
         elif mode == "train":
@@ -639,6 +659,7 @@ def main(
                     seed,
                     resolved_init,
                     depth_correction,
+                    percep_weight,
                 )
             )
         elif mode == "eval":

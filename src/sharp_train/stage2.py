@@ -264,7 +264,9 @@ def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius
 
 
 @torch.no_grad()
-def validation_loss(predictor, batches, device, stage3=None, depth_correction=True):
+def validation_loss(
+    predictor, batches, device, stage3=None, depth_correction=True, color_mask_key=None
+):
     was_training = predictor.training
     predictor.eval()
     totals = {}
@@ -275,6 +277,7 @@ def validation_loss(predictor, batches, device, stage3=None, depth_correction=Tr
             mask_key="mask_visible_tgt",
             stage3=stage3,
             depth_correction=depth_correction,
+            color_mask_key=color_mask_key,
         )
         for key, value in terms.items():
             totals[key] = totals.get(key, 0.0) + float(value) / len(batches)

@@ -395,7 +395,15 @@ def mean_of(rows, key):
 
 
 def throughput_check(
-    predictor, loader, steps, out_dir, stage3=None, depth_correction=True, lr=1e-4, warmup=5
+    predictor,
+    loader,
+    steps,
+    out_dir,
+    stage3=None,
+    depth_correction=True,
+    lr=1e-4,
+    warmup=5,
+    color_mask_key=None,
 ):
     torch.cuda.reset_peak_memory_stats()
     started = None
@@ -417,6 +425,7 @@ def throughput_check(
         lr=lr,
         warmup=warmup,
         mask_key="mask_visible_tgt",
+        color_mask_key=color_mask_key,
         log_every=5,
         callback=callback,
         stage3=stage3,

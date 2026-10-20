@@ -7,8 +7,10 @@ from sharp_train import losses
 
 
 class Stage3Loss:
-    def __init__(self, device):
+    def __init__(self, device, percep_weight=losses.STAGE3_WEIGHTS["percep"]):
         self.perceptual = losses.PerceptualLoss().to(device)
+        self.weights = dict(losses.STAGE3_WEIGHTS)
+        self.weights["percep"] = percep_weight
 
 
 def _backward(loss, leaf):
@@ -273,35 +275,57 @@ def _full_view_check(perceptual):
     color = torch.rand(1, 3, 32, 32) * 0.6 + 0.2
     target = torch.rand(1, 3, 32, 32) * 0.6 + 0.2
     alpha = torch.full((1, 1, 32, 32), 0.7)
-    mask = torch.ones(1, 1, 32, 32)
-    mask[:, :, :, :8] = 0
-    changed_color = color.clone()
-    changed_color[:, :, :, :4] = 0.05
-    changed_alpha = alpha.clone()
-    changed_alpha[:, :, :, :4] = 0.05
+    frustum = torch.ones(1, 1, 32, 32)
+    frustum[:, :, :, :8] = 0
+    visible = frustum.clone()
+    visible[:, :, :, :16] = 0
+    outside = color.clone()
+    outside[:, :, :, :4] = 0.05
+    outside_alpha = alpha.clone()
+    outside_alpha[:, :, :, :4] = 0.05
+    occluded = color.clone()
+    occluded[:, :, :, 8:12] = 0.05
+    occluded_alpha = alpha.clone()
+    occluded_alpha[:, :, :, 8:12] = 0.05
     state = _state()
     gaussians = _gaussians()
     intrinsics = torch.tensor([[100.0, 0.0, 16.0], [0.0, 100.0, 16.0], [0.0, 0.0, 1.0]]).view(
         1, 3, 3
     )
-    batch = {"image_tgt": target, "intrinsics": intrinsics, "mask_visible_tgt": mask}
+    batch = {
+        "image_tgt": target,
+        "intrinsics": intrinsics,
+        "mask_visible_tgt": visible,
+        "mask_frustum_tgt": frustum,
+    }
     with torch.no_grad():
         original = losses.stage3_terms(
             _view(color, alpha), _view(color, alpha), batch, gaussians, state, perceptual
         )
-        changed = losses.stage3_terms(
+        changed_out = losses.stage3_terms(
             _view(color, alpha),
-            _view(changed_color, changed_alpha),
+            _view(outside, outside_alpha),
             batch,
             gaussians,
             state,
             perceptual,
         )
-    masked = losses.color_l1(color, target, mask)
-    masked_changed = losses.color_l1(changed_color, target, mask)
+        changed_occ = losses.stage3_terms(
+            _view(color, alpha),
+            _view(occluded, occluded_alpha),
+            batch,
+            gaussians,
+            state,
+            perceptual,
+        )
+    visible_color = losses.color_l1(color, target, visible)
+    visible_color_occ = losses.color_l1(occluded, target, visible)
+    frustum_color = losses.color_l1(color, target, frustum)
+    frustum_color_out = losses.color_l1(outside, target, frustum)
+    frustum_color_occ = losses.color_l1(occluded, target, frustum)
 
-    color_leaf = changed_color.detach().clone().requires_grad_(True)
-    alpha_leaf = changed_alpha.detach().clone().requires_grad_(True)
+    color_leaf = color.detach().clone().requires_grad_(True)
+    alpha_leaf = alpha.detach().clone().requires_grad_(True)
     wired = losses.stage3_terms(
         _view(color, alpha), _view(color_leaf, alpha_leaf), batch, gaussians, state, perceptual
     )
@@ -312,20 +336,35 @@ def _full_view_check(perceptual):
     through_surgery = color.detach().clone().requires_grad_(True)
     perceptual(through_surgery, target).backward()
     return {
-        "masked_color_ignores_occluded_pixels": bool(torch.allclose(masked, masked_changed)),
-        "perceptual_responds_outside_mask": bool(
-            not torch.allclose(original["percep"], changed["percep"])
+        "visibility_color_ignores_occlusions": bool(
+            torch.allclose(visible_color, visible_color_occ)
         ),
-        "alpha_responds_outside_mask": bool(
-            not torch.allclose(original["alpha"], changed["alpha"])
+        "frustum_color_ignores_outside": bool(torch.allclose(frustum_color, frustum_color_out)),
+        "frustum_color_sees_occlusions": bool(not torch.allclose(frustum_color, frustum_color_occ)),
+        "perceptual_ignores_outside_frustum": bool(
+            torch.allclose(original["percep"], changed_out["percep"])
         ),
-        "perceptual_grad_outside_mask": float(color_leaf.grad[:, :, :, :8].abs().sum()),
-        "alpha_grad_outside_mask": float(alpha_leaf.grad[:, :, :, :8].abs().sum()),
+        "alpha_ignores_outside_frustum": bool(
+            torch.allclose(original["alpha"], changed_out["alpha"])
+        ),
+        "perceptual_sees_occlusions": bool(
+            not torch.allclose(original["percep"], changed_occ["percep"])
+        ),
+        "alpha_sees_occlusions": bool(not torch.allclose(original["alpha"], changed_occ["alpha"])),
+        "perceptual_grad_outside_frustum": float(color_leaf.grad[:, :, :, :8].abs().sum()),
+        "alpha_grad_outside_frustum": float(alpha_leaf.grad[:, :, :, :8].abs().sum()),
+        "perceptual_grad_inside_frustum": float(color_leaf.grad[:, :, :, 8:16].abs().sum()),
+        "alpha_grad_inside_frustum": float(alpha_leaf.grad[:, :, :, 8:16].abs().sum()),
         "surgery_matches_backward": bool(
             torch.allclose(direct.grad, through_surgery.grad, rtol=1e-3, atol=1e-4)
         ),
         "perceptual_finite": bool(torch.isfinite(original["percep"])),
         "wired_finite": all(bool(torch.isfinite(value).all()) for value in original.values()),
+        "frozen_depth_terms_are_zero": bool(
+            float(original["tv"]) == 0.0
+            and float(original["scale"]) == 0.0
+            and float(original["grad_scale"]) == 0.0
+        ),
     }
 
 
@@ -340,6 +379,10 @@ def _schedule_check():
     end = losses.cosine_lr(total - 1, total, peak, warmup)
     short = losses.cosine_lr(499, 8000, peak, 300)
     probe = losses.cosine_lr(3999, 4000, peak, warmup)
+    brief = losses.SHORT_RUN_WARMUP
+    brief_end = losses.cosine_lr(brief - 1, 4000, peak, brief)
+    brief_after = losses.cosine_lr(brief, 4000, peak, brief)
+    brief_last = losses.cosine_lr(3999, 4000, peak, brief)
     return {
         "step0": step0,
         "step499": step499,
@@ -355,6 +398,10 @@ def _schedule_check():
         "cosine_ends_at_final": math.isclose(end, peak * losses.PAPER_FINAL_RATIO, rel_tol=1e-3),
         "short_warmup_at_peak_by_499": short > 0.9 * peak,
         "probe_stays_on_ramp": math.isclose(probe, peak * 4000 / warmup),
+        "short_run_warmup": brief,
+        "short_run_reaches_peak": math.isclose(brief_end, peak),
+        "short_run_cosine_after_warmup": math.isclose(brief_after, peak, rel_tol=1e-6)
+        and brief_last < 0.5 * peak,
     }
 
 
@@ -368,7 +415,11 @@ def _alpha_target_check(perceptual):
     intrinsics = torch.tensor([[100.0, 0.0, 16.0], [0.0, 100.0, 16.0], [0.0, 0.0, 1.0]]).view(
         1, 3, 3
     )
-    batch = {"image_tgt": color, "intrinsics": intrinsics}
+    batch = {
+        "image_tgt": color,
+        "intrinsics": intrinsics,
+        "mask_frustum_tgt": torch.ones(1, 1, 32, 32),
+    }
     with torch.no_grad():
         base = losses.stage3_terms(
             _view(color, src_alpha),
@@ -458,6 +509,289 @@ def _perceptual_scale_check(perceptual):
     }
 
 
+def _composer():
+    from sharp.models.composer import GaussianComposer
+    from sharp.models.params import PredictorParams
+
+    params = PredictorParams()
+    return GaussianComposer(
+        delta_factor=params.delta_factor,
+        min_scale=params.min_scale,
+        max_scale=params.max_scale,
+        color_activation_type=params.color_activation_type,
+        opacity_activation_type=params.opacity_activation_type,
+        color_space=params.color_space,
+        scale_factor=1,
+        base_scale_on_predicted_mean=params.base_scale_on_predicted_mean,
+    )
+
+
+def _room_depth(size):
+    y = torch.linspace(0, 1, size)
+    x = torch.linspace(0, 1, size)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    floor = 1.5 / (0.2 + 0.8 * (1.0 - yy).clamp(min=0.05))
+    depth = torch.where(yy > 0.42, floor, torch.full_like(yy, 5.0))
+    box = ((xx - 0.62).abs() < 0.1) & ((yy - 0.58).abs() < 0.18)
+    return torch.where(box, torch.full_like(depth, 1.3), depth).view(1, 1, size, size)
+
+
+def _projected_base(init_size, depth):
+    from sharp.models.initializer import create_initializer
+    from sharp.models.params import InitializerParams
+
+    from sharp_train import geometry, model
+
+    depth = torch.nn.functional.interpolate(
+        depth, size=(init_size, init_size), mode="bilinear", align_corners=False
+    ).repeat(1, 2, 1, 1)
+    output = create_initializer(InitializerParams())(torch.zeros(1, 3, init_size, init_size), depth)
+    base = output.gaussian_base_values
+    grid = base.mean_x_ndc.shape[-1]
+    delta = torch.zeros(1, 14, base.mean_inverse_z_ndc.shape[2], grid, grid)
+    gaussians = _composer()(delta, base, output.global_scale)
+    width, height, focal = 1024, 768, 886.0
+    metric = model.to_metric(gaussians, torch.tensor([focal]), width, height)
+    variance = losses.projected_variance(
+        metric.means, metric.covariances, geometry.intrinsics_matrix(focal, width, height)
+    )
+    return grid, variance
+
+
+def _headroom(variance, cap):
+    median = float(variance.median())
+    return {"median": median, "cap": cap, "sqrt_cap_over_median": math.sqrt(cap / median)}
+
+
+def _splat_cap_check():
+    depth = _room_depth(1536)
+    rows = {}
+    for init_size in (384, 1536):
+        grid, variance = _projected_base(init_size, depth)
+        _, scaled_cap = losses.splat_limits(grid)
+        rows[str(init_size)] = {
+            "grid": grid,
+            "before": _headroom(variance, losses.SPLAT_MAX),
+            "after": _headroom(variance, scaled_cap),
+        }
+    before_384 = rows["384"]["before"]["sqrt_cap_over_median"]
+    before_1536 = rows["1536"]["before"]["sqrt_cap_over_median"]
+    after_384 = rows["384"]["after"]["sqrt_cap_over_median"]
+    rows["headroom_matches_1536"] = math.isclose(after_384, before_1536, rel_tol=0.1)
+    rows["grid_192_was_tighter_than_2_5x"] = before_384 < 2.5
+    rows["grid_768_headroom_above_6x"] = before_1536 > 6.0
+    return rows
+
+
+def _active_share(inverse, pixel_scale):
+    grad = losses.gradient_magnitude(inverse, pixel_scale)
+    share = float((grad > losses.FLOATER_EPS).float().mean())
+    return {
+        "share": share,
+        "median_grad": float(grad.median()),
+        "tv": float(losses.total_variation(inverse, pixel_scale)),
+    }
+
+
+def _floater_share_check():
+    room = 1.0 / _room_depth(1536)
+    steep = torch.linspace(0.05, 4.0, 1536).view(1, 1, 1, 1536).expand(1, 1, 1536, 1536)
+    rows = {}
+    for name, inverse in (("room", room), ("steep", steep)):
+        coarse = torch.nn.functional.avg_pool2d(inverse, 4)
+        rows[name] = {
+            "1536_before": _active_share(inverse, 1.0),
+            "384_before": _active_share(coarse, 1.0),
+            "384_after": _active_share(coarse, losses.depth_pixel_scale(coarse)),
+            "1536_after": _active_share(inverse, losses.depth_pixel_scale(inverse)),
+        }
+    steep = rows["steep"]
+    room_row = rows["room"]
+    rows["steep_384_before_exceeds_half"] = steep["384_before"]["share"] > 0.5
+    rows["steep_1536_before_below_half"] = steep["1536_before"]["share"] < 0.5
+    rows["steep_384_after_below_half"] = steep["384_after"]["share"] < 0.5
+    rows["room_shares_below_half"] = (
+        room_row["1536_before"]["share"] < 0.5 and room_row["384_before"]["share"] < 0.5
+    )
+    raw = losses.total_variation(torch.nn.functional.avg_pool2d(room, 4))
+    scaled = losses.total_variation(
+        torch.nn.functional.avg_pool2d(room, 4), 384 / losses.REFERENCE_DEPTH
+    )
+    rows["tv_scales_with_pixel"] = bool(torch.allclose(scaled, raw * 384 / losses.REFERENCE_DEPTH))
+    return rows
+
+
+def _synthetic_image(size=128):
+    y = torch.linspace(0, 1, size).view(1, 1, size, 1)
+    x = torch.linspace(0, 1, size).view(1, 1, 1, size)
+    image = torch.cat(
+        [
+            y.expand(1, 1, size, size),
+            x.expand(1, 1, size, size),
+            torch.full((1, 1, size, size), 0.25),
+        ],
+        1,
+    )
+    image[:, :, 24:80, 36:100] = torch.tensor([0.85, 0.2, 0.15]).view(1, 3, 1, 1)
+    image[:, :, 70:120, 60:118] = torch.tensor([0.15, 0.55, 0.8]).view(1, 3, 1, 1)
+    return image.clamp(0, 1)
+
+
+def _layer_parts(perceptual, rendered, target):
+    with torch.no_grad():
+        target_layers = perceptual.features(target)
+        rendered_layers = perceptual.features(rendered)
+        parts = []
+        for rendered_layer, target_layer in zip(rendered_layers, target_layers, strict=True):
+            feature, gram = losses.feature_and_gram(rendered_layer, target_layer)
+            parts.append({"feature": float(feature), "gram": float(gram)})
+    return parts
+
+
+def _grad_norm(loss, leaf):
+    leaf.grad = None
+    loss.backward()
+    return float(leaf.grad.norm())
+
+
+def _perceptual_audit(perceptual):
+    sharp = _synthetic_image()
+    blurred = torch.nn.functional.avg_pool2d(sharp, 9, stride=1, padding=4)
+    parts = _layer_parts(perceptual, blurred, sharp)
+    feature = sum(part["feature"] for part in parts)
+    gram = sum(part["gram"] for part in parts)
+    rendered = blurred.detach().clone().requires_grad_(True)
+    percep_grad = _grad_norm(perceptual(rendered, sharp), rendered)
+    l1_grad = _grad_norm(losses.color_l1(rendered, sharp, torch.ones_like(sharp[:, :1])), rendered)
+    ratio = percep_grad / l1_grad
+    weighted = losses.STAGE3_WEIGHTS["percep"] * ratio
+    recommend = losses.STAGE3_WEIGHTS["percep"] if 3.0 <= weighted <= 10.0 else 5.0 / ratio
+    mask = torch.ones(1, 1, sharp.shape[-2], sharp.shape[-1])
+    mask[:, :, :32, :] = 0
+    black = blurred * mask
+    composited = losses.in_frustum(blurred, sharp, mask)
+    black_parts = _layer_parts(perceptual, black, sharp)
+    composite_parts = _layer_parts(perceptual, composited, sharp)
+    black_gram = sum(part["gram"] for part in black_parts)
+    composite_gram = sum(part["gram"] for part in composite_parts)
+    return {
+        "layers": parts,
+        "feature": feature,
+        "gram": gram,
+        "gram_over_feature": gram / feature,
+        "percep_grad": percep_grad,
+        "l1_grad": l1_grad,
+        "percep_over_l1": ratio,
+        "paper_weight_over_l1": weighted,
+        "recommend": recommend,
+        "paper_weight": losses.STAGE3_WEIGHTS["percep"],
+        "black_gram": black_gram,
+        "composite_gram": composite_gram,
+        "black_leaks_more_than_composite": black_gram > composite_gram,
+    }
+
+
+def _dead_regularizer_check(perceptual):
+    from sharp.models.alignment import LearnedAlignment
+    from sharp.models.predictor import DepthAlignment
+
+    from sharp_train.model import TrainingState, align_depth, hold_depth_alignment
+
+    mono = torch.rand(1, 2, 32, 32) + 0.8
+    gt = torch.rand(1, 1, 32, 32) + 0.8
+    estimator = LearnedAlignment(steps=4, stride=1, base_width=16, depth_decoder_features=False)
+    alignment = DepthAlignment(estimator)
+    hold_depth_alignment(alignment)
+    corrected, scale = align_depth(alignment, mono, gt, None, True)
+    state = _state()
+    state = TrainingState(
+        aligned_depth=corrected,
+        scale_map=scale,
+        delta_xy=state.delta_xy,
+        base_x=state.base_x,
+        base_y=state.base_y,
+    )
+    intrinsics = torch.tensor([[100.0, 0.0, 16.0], [0.0, 100.0, 16.0], [0.0, 0.0, 1.0]]).view(
+        1, 3, 3
+    )
+    batch = {
+        "image_tgt": torch.rand(1, 3, 32, 32),
+        "intrinsics": intrinsics,
+        "mask_frustum_tgt": torch.ones(1, 1, 32, 32),
+    }
+    frozen = losses.stage3_terms(
+        _view(batch["image_tgt"], torch.full((1, 1, 32, 32), 0.7)),
+        _view(batch["image_tgt"], torch.full((1, 1, 32, 32), 0.7)),
+        batch,
+        _gaussians(),
+        state,
+        perceptual,
+    )
+    live = torch.nn.Parameter(torch.tensor(1.0))
+    unused = torch.nn.Parameter(torch.tensor(1.0))
+    total = live + frozen["tv"] + frozen["scale"] + frozen["grad_scale"]
+    frozen_grads = torch.autograd.grad(total, [live, unused], allow_unused=True)
+    depth = torch.rand(1, 2, 32, 32, requires_grad=True) + 0.5
+    scale_map = torch.rand(1, 1, 32, 32, requires_grad=True) * 0.4 + 0.8
+    decoder = torch.nn.Parameter(torch.zeros(3))
+    open_state = TrainingState(
+        aligned_depth=depth,
+        scale_map=scale_map,
+        delta_xy=state.delta_xy,
+        base_x=state.base_x,
+        base_y=state.base_y,
+    )
+    opened = losses.stage3_terms(
+        _view(batch["image_tgt"], torch.full((1, 1, 32, 32), 0.7)),
+        _view(batch["image_tgt"], torch.full((1, 1, 32, 32), 0.7)),
+        batch,
+        _gaussians(),
+        open_state,
+        perceptual,
+    )
+    open_grads = torch.autograd.grad(
+        opened["tv"] + opened["scale"] + opened["grad_scale"],
+        [depth, scale_map, decoder],
+        allow_unused=True,
+    )
+    return {
+        "held_depth_requires_grad": bool(corrected.requires_grad),
+        "held_scale_requires_grad": bool(scale.requires_grad),
+        "frozen_tv": float(frozen["tv"]),
+        "frozen_scale": float(frozen["scale"]),
+        "frozen_grad_scale": float(frozen["grad_scale"]),
+        "frozen_live_connected": frozen_grads[0] is not None,
+        "frozen_unused_is_none": frozen_grads[1] is None,
+        "open_depth_grad": open_grads[0] is not None and float(open_grads[0].abs().sum()) > 0,
+        "open_scale_grad": open_grads[1] is not None and float(open_grads[1].abs().sum()) > 0,
+        "open_decoder_unused": open_grads[2] is None,
+        "open_tv": float(opened["tv"].detach()),
+        "open_scale": float(opened["scale"].detach()),
+        "open_grad_scale": float(opened["grad_scale"].detach()),
+    }
+
+
+def _cli_defaults():
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "modal_app.py").read_text()
+    warmup = int(re.search(r"^STAGE3_WARMUP = ([0-9_]+)", text, re.M).group(1).replace("_", ""))
+    percep = [float(item) for item in re.findall(r"percep_weight: float = ([0-9.]+)", text)]
+    return {"stage3_warmup": warmup, "percep_weight": percep}
+
+
+def _alpha_hole_grad():
+    empty = torch.zeros(1, 1, 8, 8, requires_grad=True)
+    losses.alpha_bce(empty).backward()
+    partial = torch.full((1, 1, 8, 8), 0.2, requires_grad=True)
+    losses.alpha_bce(partial).backward()
+    return {
+        "empty_grad": float(empty.grad.abs().mean()),
+        "partial_grad": float(partial.grad.abs().mean()),
+    }
+
+
 def cpu_checks():
     regularizers = _regularizer_checks()
     perceptual = losses.PerceptualLoss()
@@ -472,6 +806,12 @@ def cpu_checks():
     alpha_target = _alpha_target_check(perceptual)
     hinges = _hinge_check()
     perceptual_scale = _perceptual_scale_check(perceptual)
+    splat_cap = _splat_cap_check()
+    floater_share = _floater_share_check()
+    perceptual_audit = _perceptual_audit(perceptual)
+    dead_terms = _dead_regularizer_check(perceptual)
+    cli = _cli_defaults()
+    hole_grad = _alpha_hole_grad()
     loss_names = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale"]
     criteria = {
         f"{name} finite with gradient": regularizers[name]["finite"]
@@ -482,15 +822,22 @@ def cpu_checks():
         "splat_identity"
     ]["matches"]
     criteria["hole fraction is the share of alpha < 0.5"] = holes["matches"]
-    criteria["full-view losses respond outside the visibility mask"] = bool(
-        full_view["masked_color_ignores_occluded_pixels"]
-        and full_view["perceptual_responds_outside_mask"]
-        and full_view["alpha_responds_outside_mask"]
-        and full_view["perceptual_grad_outside_mask"] > 0
-        and full_view["alpha_grad_outside_mask"] > 0
+    criteria["frustum mask supervises occlusions and ignores the outside"] = bool(
+        full_view["visibility_color_ignores_occlusions"]
+        and full_view["frustum_color_ignores_outside"]
+        and full_view["frustum_color_sees_occlusions"]
+        and full_view["perceptual_ignores_outside_frustum"]
+        and full_view["alpha_ignores_outside_frustum"]
+        and full_view["perceptual_sees_occlusions"]
+        and full_view["alpha_sees_occlusions"]
+        and full_view["perceptual_grad_outside_frustum"] == 0
+        and full_view["alpha_grad_outside_frustum"] == 0
+        and full_view["perceptual_grad_inside_frustum"] > 0
+        and full_view["alpha_grad_inside_frustum"] > 0
         and full_view["perceptual_finite"]
         and full_view["wired_finite"]
         and full_view["surgery_matches_backward"]
+        and full_view["frozen_depth_terms_are_zero"]
     )
     criteria["depth correction changes depth only when enabled"] = bool(
         depth["init_is_identity"]
@@ -527,6 +874,11 @@ def cpu_checks():
         and schedule["short_warmup_at_peak_by_499"]
         and schedule["probe_stays_on_ramp"]
     )
+    criteria["short run warmup reaches the peak inside 4000 steps"] = bool(
+        cli["stage3_warmup"] == losses.SHORT_RUN_WARMUP
+        and schedule["short_run_reaches_peak"]
+        and schedule["short_run_cosine_after_warmup"]
+    )
     criteria["alpha bce targets 1 on the novel view"] = bool(
         alpha_target["wired_to_both_views"]
         and alpha_target["matches_bce_against_one"]
@@ -538,6 +890,44 @@ def cpu_checks():
         and hinges["inside_band_is_zero"]
         and hinges["offset_dead_zone"]
         and hinges["offset_fires_past_400"]
+    )
+    criteria["splat cap at grid 192 matches grid 768 headroom"] = bool(
+        splat_cap["headroom_matches_1536"]
+        and splat_cap["grid_192_was_tighter_than_2_5x"]
+        and splat_cap["grid_768_headroom_above_6x"]
+    )
+    criteria["floater threshold tracks depth resolution"] = bool(
+        floater_share["steep_384_before_exceeds_half"]
+        and floater_share["steep_1536_before_below_half"]
+        and floater_share["steep_384_after_below_half"]
+        and floater_share["room_shares_below_half"]
+        and floater_share["tv_scales_with_pixel"]
+    )
+    criteria["empty alpha keeps a gradient"] = bool(
+        hole_grad["empty_grad"] > 0 and hole_grad["partial_grad"] > 0
+    )
+    criteria["perceptual audit is finite at the paper weight"] = bool(
+        perceptual_audit["feature"] > 0
+        and perceptual_audit["gram"] > 0
+        and perceptual_audit["percep_grad"] > 0
+        and perceptual_audit["l1_grad"] > 0
+        and perceptual_audit["black_leaks_more_than_composite"]
+        and perceptual_audit["paper_weight"] == 3.0
+        and perceptual_audit["recommend"] > 0
+        and cli["percep_weight"]
+        and all(weight == 3.0 for weight in cli["percep_weight"])
+    )
+    criteria["held depth regularizers have no parameter gradient"] = bool(
+        not dead_terms["held_depth_requires_grad"]
+        and not dead_terms["held_scale_requires_grad"]
+        and dead_terms["frozen_tv"] == 0.0
+        and dead_terms["frozen_scale"] == 0.0
+        and dead_terms["frozen_grad_scale"] == 0.0
+        and dead_terms["frozen_live_connected"]
+        and dead_terms["frozen_unused_is_none"]
+        and dead_terms["open_depth_grad"]
+        and dead_terms["open_scale_grad"]
+        and dead_terms["open_decoder_unused"]
     )
     criteria["perceptual scaling matches appendix A.2"] = bool(
         perceptual_scale["feature_gram_matches_paper"]
@@ -556,6 +946,12 @@ def cpu_checks():
         "alpha_target": alpha_target,
         "hinges": hinges,
         "perceptual_scale": perceptual_scale,
+        "splat_cap": splat_cap,
+        "floater_share": floater_share,
+        "perceptual_audit": perceptual_audit,
+        "dead_terms": dead_terms,
+        "cli": cli,
+        "hole_grad": hole_grad,
         "criteria": criteria,
         "passed": all(criteria.values()),
     }
@@ -579,6 +975,12 @@ def main():
         "alpha_target": report["alpha_target"],
         "hinges": report["hinges"],
         "perceptual_scale": report["perceptual_scale"],
+        "splat_cap": report["splat_cap"],
+        "floater_share": report["floater_share"],
+        "perceptual_audit": report["perceptual_audit"],
+        "dead_terms": report["dead_terms"],
+        "cli": report["cli"],
+        "hole_grad": report["hole_grad"],
     }
     print(json.dumps(printable, indent=1), flush=True)
     if not report["passed"]:

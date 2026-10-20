@@ -27,6 +27,9 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 PAPER_PEAK_LR = 1.6e-4
 PAPER_WARMUP = 10_000
 PAPER_FINAL_RATIO = 0.1
+PAPER_GRID = 768
+REFERENCE_DEPTH = 1536
+SHORT_RUN_WARMUP = 1_000
 
 
 def clip_gradients(parameters):
@@ -67,13 +70,17 @@ def disparity_l1(rendered_depth, target_depth, mask):
     return masked_mean((rendered - target).abs(), mask)
 
 
-def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_weight=0.2):
+def pair_losses(
+    rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_weight=0.2, color_mask_key=None
+):
     valid_src = valid_depth_mask(batch["depth_src"])
     valid_tgt = valid_depth_mask(batch["depth_tgt"])
     color_mask_src = torch.ones_like(valid_src)
     color_mask_tgt = torch.ones_like(valid_tgt)
+    color_key = color_mask_key if color_mask_key is not None else tgt_mask_key
+    if color_key is not None:
+        color_mask_tgt = batch[color_key]
     if tgt_mask_key is not None:
-        color_mask_tgt = batch[tgt_mask_key]
         valid_tgt = valid_tgt * batch[tgt_mask_key]
     terms = {
         "color_src": color_l1(rendering_src.color, batch["image_src"], color_mask_src),
@@ -93,15 +100,19 @@ def hole_fraction(alpha, threshold=0.5):
     return (alpha < threshold).float().mean()
 
 
-def alpha_bce(alpha):
-    probability = alpha.clamp(1e-4, 1.0 - 1e-4)
-    return F.binary_cross_entropy(probability, torch.ones_like(probability))
+def alpha_bce(alpha, mask=None):
+    safe = alpha.clamp(1e-4, 1.0 - 1e-4)
+    probability = alpha + (safe - alpha).detach()
+    target = torch.ones_like(probability)
+    if mask is None:
+        return F.binary_cross_entropy(probability, target)
+    return masked_mean(F.binary_cross_entropy(probability, target, reduction="none"), mask)
 
 
-def total_variation(image):
+def total_variation(image, pixel_scale=1.0):
     loss = image.new_zeros(())
-    dx = image[..., :, 1:] - image[..., :, :-1]
-    dy = image[..., 1:, :] - image[..., :-1, :]
+    dx = (image[..., :, 1:] - image[..., :, :-1]) * pixel_scale
+    dy = (image[..., 1:, :] - image[..., :-1, :]) * pixel_scale
     if dx.numel():
         loss = loss + dx.abs().mean()
     if dy.numel():
@@ -109,14 +120,35 @@ def total_variation(image):
     return loss
 
 
-def gradient_magnitude(image):
-    dx = F.pad(image[..., :, 1:] - image[..., :, :-1], (0, 1))
-    dy = F.pad(image[..., 1:, :] - image[..., :-1, :], (0, 0, 0, 1))
+def gradient_magnitude(image, pixel_scale=1.0):
+    dx = F.pad(image[..., :, 1:] - image[..., :, :-1], (0, 1)) * pixel_scale
+    dy = F.pad(image[..., 1:, :] - image[..., :-1, :], (0, 0, 0, 1)) * pixel_scale
     return torch.sqrt(dx.square() + dy.square() + 1e-12)
 
 
-def floater_loss(opacities, inverse_depth, base_x, base_y, sigma=FLOATER_SIGMA, eps=FLOATER_EPS):
-    grad = gradient_magnitude(inverse_depth[:, :1])
+def depth_pixel_scale(depth):
+    return depth.shape[-1] / REFERENCE_DEPTH
+
+
+def variance_scale(grid):
+    return (PAPER_GRID / grid) ** 2
+
+
+def splat_limits(grid):
+    scale = variance_scale(grid)
+    return SPLAT_MIN * scale, SPLAT_MAX * scale
+
+
+def connected_term(source, compute):
+    if source.requires_grad:
+        return compute()
+    return source.new_zeros(())
+
+
+def floater_loss(
+    opacities, inverse_depth, base_x, base_y, sigma=FLOATER_SIGMA, eps=FLOATER_EPS, pixel_scale=1.0
+):
+    grad = gradient_magnitude(inverse_depth[:, :1], pixel_scale)
     batch, _, layers, height, width = base_x.shape
     grad_in = grad.repeat_interleave(layers, dim=0)
     grid = torch.stack(
@@ -157,14 +189,14 @@ def scale_mae(scale):
     return (scale - 1).abs().mean()
 
 
-def multiscale_tv(scale, levels=SCALE_TV_LEVELS):
+def multiscale_tv(scale, levels=SCALE_TV_LEVELS, pixel_scale=1.0):
     total = scale.new_zeros(())
     current = scale
     for _ in range(levels):
         if min(current.shape[-2:]) < 2:
             break
         current = F.avg_pool2d(current, 2)
-        total = total + total_variation(current)
+        total = total + total_variation(current, pixel_scale)
     return total
 
 
@@ -174,12 +206,21 @@ def gram_matrix(features):
     return matrix @ matrix.transpose(1, 2) / (height * width)
 
 
-def feature_gram_loss(rendered, target):
+def feature_and_gram(rendered, target):
     batch = rendered.shape[0]
     channels, height, width = rendered.shape[1:]
     feature = (rendered - target).square().sum() / (channels * height * width * batch)
     gram = (gram_matrix(rendered) - gram_matrix(target)).square().sum()
-    return feature + 10.0 * gram / (channels * channels * batch)
+    return feature, 10.0 * gram / (channels * channels * batch)
+
+
+def feature_gram_loss(rendered, target):
+    feature, gram = feature_and_gram(rendered, target)
+    return feature + gram
+
+
+def in_frustum(rendered, target, mask):
+    return rendered * mask + target.detach() * (1.0 - mask)
 
 
 class PerceptualLoss(nn.Module):
@@ -235,23 +276,34 @@ def stage3_terms(rendering_src, rendering_tgt, batch, gaussians, state, perceptu
     inverse_depth = 1.0 / state.aligned_depth.clamp(min=1e-4)
     layers, height, width = state.base_x.shape[2:]
     opacities = gaussians.opacities.view(-1, layers, height, width)
+    pixel_scale = depth_pixel_scale(state.aligned_depth)
+    low, high = splat_limits(width)
+    frustum = batch["mask_frustum_tgt"]
+    novel_color = in_frustum(rendering_tgt.color, batch["image_tgt"], frustum)
     return {
-        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha),
-        "percep": perceptual(rendering_tgt.color, batch["image_tgt"]),
-        "tv": total_variation(inverse_depth[:, 1:2]),
-        "grad": floater_loss(opacities, inverse_depth[:, :1], state.base_x, state.base_y),
+        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha, frustum),
+        "percep": perceptual(novel_color, batch["image_tgt"]),
+        "tv": connected_term(
+            state.aligned_depth, lambda: total_variation(inverse_depth[:, 1:2], pixel_scale)
+        ),
+        "grad": floater_loss(
+            opacities, inverse_depth[:, :1], state.base_x, state.base_y, pixel_scale=pixel_scale
+        ),
         "delta": offset_hinge(state.delta_xy),
         "splat": splat_hinge(
-            projected_variance(gaussians.means, gaussians.covariances, batch["intrinsics"])
+            projected_variance(gaussians.means, gaussians.covariances, batch["intrinsics"]),
+            low,
+            high,
         ),
-        "scale": scale_mae(state.scale_map),
-        "grad_scale": multiscale_tv(state.scale_map),
+        "scale": connected_term(state.scale_map, lambda: scale_mae(state.scale_map)),
+        "grad_scale": connected_term(
+            state.scale_map, lambda: multiscale_tv(state.scale_map, pixel_scale=pixel_scale)
+        ),
     }
 
 
-def add_stage3(terms, extra):
+def add_stage3(terms, extra, weights=None):
+    weights = STAGE3_WEIGHTS if weights is None else weights
     terms.update(extra)
-    terms["total"] = terms["total"] + sum(
-        STAGE3_WEIGHTS[key] * extra[key] for key in STAGE3_WEIGHTS
-    )
+    terms["total"] = terms["total"] + sum(weights[key] * extra[key] for key in weights)
     return terms

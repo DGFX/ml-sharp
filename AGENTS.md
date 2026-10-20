@@ -24,7 +24,7 @@ These are our stages, not the paper's two-stage curriculum.
 | --- | --- | --- |
 | 1 | Prove the training loop: view-pair loader, forward, gsplat render in both views, L1 on color and disparity. Gradient check, Apple-weights check, overfit check. | `skills/verify-ml-sharp` |
 | 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks`, then `--task stage2-train`, then `--task stage2-eval` |
-| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Default GPU `A100-40GB`, override with `--gpu A100-80GB` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check`, then `--mode train`, then `--mode eval` |
+| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the novel view inside the frustum, regularizers, depth-correction losses. Default GPU `A100-40GB`, override with `--gpu A100-80GB` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check`, then `--mode train`, then `--mode eval` |
 
 ## Where things run
 
