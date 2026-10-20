@@ -424,7 +424,6 @@ def stage3_check(
         depth_correction=bool(depth_correction),
         lr=1.6e-4,
         warmup=5,
-        color_mask_key="mask_frustum_tgt",
     )
     keys = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale", "total"]
     report["losses_finite"] = all(math.isfinite(report["last"][key]) for key in keys)
@@ -502,7 +501,7 @@ def stage3_train(
         "hold_depth_alignment": correction,
         "grad_clip": losses.GRAD_CLIP_NORM,
         "weights": loss.weights,
-        "color_mask": "mask_frustum_tgt",
+        "color_mask": losses.FULL_IMAGE,
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
     val_history = [
@@ -514,7 +513,6 @@ def stage3_train(
                 device,
                 stage3=loss,
                 depth_correction=correction,
-                color_mask_key="mask_frustum_tgt",
             ),
         }
     ]
@@ -532,7 +530,6 @@ def stage3_train(
                         device,
                         stage3=loss,
                         depth_correction=correction,
-                        color_mask_key="mask_frustum_tgt",
                     ),
                 }
             )
@@ -553,7 +550,6 @@ def stage3_train(
         lr=lr,
         warmup=warmup,
         mask_key="mask_visible_tgt",
-        color_mask_key="mask_frustum_tgt",
         log_every=50,
         max_seconds=max_minutes * 60,
         callback=callback,

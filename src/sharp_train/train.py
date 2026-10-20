@@ -37,7 +37,7 @@ def forward_pair(
         rendering_tgt,
         batch,
         tgt_mask_key=mask_key,
-        color_mask_key=color_mask_key,
+        color_mask_key=losses.resolve_color_mask_key(color_mask_key, stage3 is not None),
     )
     if stage3 is not None:
         extra = losses.stage3_terms(

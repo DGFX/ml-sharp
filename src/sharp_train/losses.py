@@ -30,6 +30,7 @@ PAPER_FINAL_RATIO = 0.1
 PAPER_GRID = 768
 REFERENCE_DEPTH = 1536
 SHORT_RUN_WARMUP = 1_000
+FULL_IMAGE = "full"
 
 
 def clip_gradients(parameters):
@@ -70,6 +71,14 @@ def disparity_l1(rendered_depth, target_depth, mask):
     return masked_mean((rendered - target).abs(), mask)
 
 
+def resolve_color_mask_key(color_mask_key, stage3):
+    if color_mask_key is not None:
+        return color_mask_key
+    if stage3:
+        return FULL_IMAGE
+    return None
+
+
 def pair_losses(
     rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_weight=0.2, color_mask_key=None
 ):
@@ -77,7 +86,12 @@ def pair_losses(
     valid_tgt = valid_depth_mask(batch["depth_tgt"])
     color_mask_src = torch.ones_like(valid_src)
     color_mask_tgt = torch.ones_like(valid_tgt)
-    color_key = color_mask_key if color_mask_key is not None else tgt_mask_key
+    if color_mask_key == FULL_IMAGE:
+        color_key = None
+    elif color_mask_key is not None:
+        color_key = color_mask_key
+    else:
+        color_key = tgt_mask_key
     if color_key is not None:
         color_mask_tgt = batch[color_key]
     if tgt_mask_key is not None:
@@ -96,8 +110,11 @@ def pair_losses(
     return terms
 
 
-def hole_fraction(alpha, threshold=0.5):
-    return (alpha < threshold).float().mean()
+def hole_fraction(alpha, threshold=0.5, mask=None):
+    holes = (alpha < threshold).float()
+    if mask is None:
+        return holes.mean()
+    return masked_mean(holes, mask)
 
 
 def alpha_bce(alpha, mask=None):
@@ -278,11 +295,9 @@ def stage3_terms(rendering_src, rendering_tgt, batch, gaussians, state, perceptu
     opacities = gaussians.opacities.view(-1, layers, height, width)
     pixel_scale = depth_pixel_scale(state.aligned_depth)
     low, high = splat_limits(width)
-    frustum = batch["mask_frustum_tgt"]
-    novel_color = in_frustum(rendering_tgt.color, batch["image_tgt"], frustum)
     return {
-        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha, frustum),
-        "percep": perceptual(novel_color, batch["image_tgt"]),
+        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha),
+        "percep": perceptual(rendering_tgt.color, batch["image_tgt"]),
         "tv": connected_term(
             state.aligned_depth, lambda: total_variation(inverse_depth[:, 1:2], pixel_scale)
         ),

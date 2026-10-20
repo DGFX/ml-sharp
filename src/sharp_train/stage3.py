@@ -80,7 +80,15 @@ def _regularizer_checks():
 def _hole_fraction_check():
     alpha = torch.tensor([0.0, 0.49, 0.5, 0.9], dtype=torch.float32).view(1, 1, 1, 4)
     value = float(losses.hole_fraction(alpha))
-    return {"hole_fraction": value, "expected": 0.5, "matches": math.isclose(value, 0.5)}
+    inside = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32).view(1, 1, 1, 4)
+    masked = float(losses.hole_fraction(alpha, mask=inside))
+    return {
+        "hole_fraction": value,
+        "expected": 0.5,
+        "matches": math.isclose(value, 0.5),
+        "frustum_masked": masked,
+        "frustum_masked_differs": not math.isclose(value, masked) and math.isclose(masked, 0.0),
+    }
 
 
 def _fresh_alignment():
@@ -270,100 +278,122 @@ def _gaussians():
     )
 
 
+def _novel_pair(color, alpha, depth, batch, perceptual, state, gaussians):
+    source = _view(color.detach(), alpha.detach())
+    novel = _view(color, alpha)
+    novel.depth = depth
+    color_key = losses.resolve_color_mask_key(None, True)
+    terms = losses.pair_losses(
+        source,
+        novel,
+        batch,
+        tgt_mask_key="mask_visible_tgt",
+        color_mask_key=color_key,
+    )
+    extra = losses.stage3_terms(source, novel, batch, gaussians, state, perceptual)
+    return terms, extra
+
+
+def _region_grad(loss, leaf, columns):
+    leaf.grad = None
+    loss.backward(retain_graph=True)
+    return float(leaf.grad[:, :, :, columns].abs().sum())
+
+
 def _full_view_check(perceptual):
     torch.manual_seed(0)
-    color = torch.rand(1, 3, 32, 32) * 0.6 + 0.2
-    target = torch.rand(1, 3, 32, 32) * 0.6 + 0.2
+    color = torch.rand(1, 3, 32, 32) * 0.4 + 0.4
+    target = torch.rand(1, 3, 32, 32) * 0.2 + 0.1
     alpha = torch.full((1, 1, 32, 32), 0.7)
+    depth = torch.ones(1, 1, 32, 32)
     frustum = torch.ones(1, 1, 32, 32)
     frustum[:, :, :, :8] = 0
     visible = frustum.clone()
     visible[:, :, :, :16] = 0
     outside = color.clone()
-    outside[:, :, :, :4] = 0.05
+    outside[:, :, :, :8] = 0.02
     outside_alpha = alpha.clone()
-    outside_alpha[:, :, :, :4] = 0.05
-    occluded = color.clone()
-    occluded[:, :, :, 8:12] = 0.05
-    occluded_alpha = alpha.clone()
-    occluded_alpha[:, :, :, 8:12] = 0.05
+    outside_alpha[:, :, :, :8] = 0.05
+    outside_depth = depth.clone()
+    outside_depth[:, :, :, :8] = 4.0
     state = _state()
     gaussians = _gaussians()
     intrinsics = torch.tensor([[100.0, 0.0, 16.0], [0.0, 100.0, 16.0], [0.0, 0.0, 1.0]]).view(
         1, 3, 3
     )
     batch = {
+        "image_src": target,
         "image_tgt": target,
+        "depth_src": depth,
+        "depth_tgt": depth,
         "intrinsics": intrinsics,
         "mask_visible_tgt": visible,
         "mask_frustum_tgt": frustum,
     }
     with torch.no_grad():
-        original = losses.stage3_terms(
-            _view(color, alpha), _view(color, alpha), batch, gaussians, state, perceptual
+        base_terms, base_extra = _novel_pair(
+            color, alpha, depth, batch, perceptual, state, gaussians
         )
-        changed_out = losses.stage3_terms(
-            _view(color, alpha),
-            _view(outside, outside_alpha),
-            batch,
-            gaussians,
-            state,
-            perceptual,
+        changed_terms, changed_extra = _novel_pair(
+            outside, outside_alpha, outside_depth, batch, perceptual, state, gaussians
         )
-        changed_occ = losses.stage3_terms(
-            _view(color, alpha),
-            _view(occluded, occluded_alpha),
-            batch,
-            gaussians,
-            state,
-            perceptual,
-        )
-    visible_color = losses.color_l1(color, target, visible)
-    visible_color_occ = losses.color_l1(occluded, target, visible)
-    frustum_color = losses.color_l1(color, target, frustum)
-    frustum_color_out = losses.color_l1(outside, target, frustum)
-    frustum_color_occ = losses.color_l1(occluded, target, frustum)
-
-    color_leaf = color.detach().clone().requires_grad_(True)
-    alpha_leaf = alpha.detach().clone().requires_grad_(True)
-    wired = losses.stage3_terms(
-        _view(color, alpha), _view(color_leaf, alpha_leaf), batch, gaussians, state, perceptual
+    color_leaf = outside.detach().clone().requires_grad_(True)
+    alpha_leaf = outside_alpha.detach().clone().requires_grad_(True)
+    depth_leaf = outside_depth.detach().clone().requires_grad_(True)
+    terms, extra = _novel_pair(
+        color_leaf, alpha_leaf, depth_leaf, batch, perceptual, state, gaussians
     )
-    (wired["alpha"] + wired["percep"]).backward()
-
+    outside_cols = slice(0, 8)
+    color_grad_outside = _region_grad(terms["color_tgt"], color_leaf, outside_cols)
+    alpha_grad_outside = _region_grad(extra["alpha"], alpha_leaf, outside_cols)
+    percep_grad_outside = _region_grad(extra["percep"], color_leaf, outside_cols)
+    masked_color = color_leaf.detach().clone().requires_grad_(True)
+    masked_alpha = alpha_leaf.detach().clone().requires_grad_(True)
+    masked_color_grad = _region_grad(
+        losses.color_l1(masked_color, target, frustum), masked_color, outside_cols
+    )
+    masked_alpha_grad = _region_grad(
+        losses.alpha_bce(masked_alpha, frustum), masked_alpha, outside_cols
+    )
+    masked_percep_color = color_leaf.detach().clone().requires_grad_(True)
+    masked_percep_grad = _region_grad(
+        perceptual(losses.in_frustum(masked_percep_color, target, frustum), target),
+        masked_percep_color,
+        outside_cols,
+    )
     direct = color.detach().clone().requires_grad_(True)
     perceptual.value(direct, target).backward()
     through_surgery = color.detach().clone().requires_grad_(True)
     perceptual(through_surgery, target).backward()
     return {
-        "visibility_color_ignores_occlusions": bool(
-            torch.allclose(visible_color, visible_color_occ)
+        "color_key": losses.resolve_color_mask_key(None, True),
+        "color_changes_outside": bool(
+            not torch.allclose(base_terms["color_tgt"], changed_terms["color_tgt"])
         ),
-        "frustum_color_ignores_outside": bool(torch.allclose(frustum_color, frustum_color_out)),
-        "frustum_color_sees_occlusions": bool(not torch.allclose(frustum_color, frustum_color_occ)),
-        "perceptual_ignores_outside_frustum": bool(
-            torch.allclose(original["percep"], changed_out["percep"])
+        "alpha_changes_outside": bool(
+            not torch.allclose(base_extra["alpha"], changed_extra["alpha"])
         ),
-        "alpha_ignores_outside_frustum": bool(
-            torch.allclose(original["alpha"], changed_out["alpha"])
+        "percep_changes_outside": bool(
+            not torch.allclose(base_extra["percep"], changed_extra["percep"])
         ),
-        "perceptual_sees_occlusions": bool(
-            not torch.allclose(original["percep"], changed_occ["percep"])
+        "depth_ignores_outside": bool(
+            torch.allclose(base_terms["depth_tgt"], changed_terms["depth_tgt"])
         ),
-        "alpha_sees_occlusions": bool(not torch.allclose(original["alpha"], changed_occ["alpha"])),
-        "perceptual_grad_outside_frustum": float(color_leaf.grad[:, :, :, :8].abs().sum()),
-        "alpha_grad_outside_frustum": float(alpha_leaf.grad[:, :, :, :8].abs().sum()),
-        "perceptual_grad_inside_frustum": float(color_leaf.grad[:, :, :, 8:16].abs().sum()),
-        "alpha_grad_inside_frustum": float(alpha_leaf.grad[:, :, :, 8:16].abs().sum()),
+        "color_grad_outside": color_grad_outside,
+        "alpha_grad_outside": alpha_grad_outside,
+        "percep_grad_outside": percep_grad_outside,
+        "frustum_masked_color_grad_outside": masked_color_grad,
+        "frustum_masked_alpha_grad_outside": masked_alpha_grad,
+        "frustum_masked_percep_grad_outside": masked_percep_grad,
         "surgery_matches_backward": bool(
             torch.allclose(direct.grad, through_surgery.grad, rtol=1e-3, atol=1e-4)
         ),
-        "perceptual_finite": bool(torch.isfinite(original["percep"])),
-        "wired_finite": all(bool(torch.isfinite(value).all()) for value in original.values()),
+        "perceptual_finite": bool(torch.isfinite(base_extra["percep"])),
+        "wired_finite": all(bool(torch.isfinite(value).all()) for value in base_extra.values()),
         "frozen_depth_terms_are_zero": bool(
-            float(original["tv"]) == 0.0
-            and float(original["scale"]) == 0.0
-            and float(original["grad_scale"]) == 0.0
+            float(base_extra["tv"]) == 0.0
+            and float(base_extra["scale"]) == 0.0
+            and float(base_extra["grad_scale"]) == 0.0
         ),
     }
 
@@ -778,7 +808,11 @@ def _cli_defaults():
     text = (Path(__file__).resolve().parents[2] / "modal_app.py").read_text()
     warmup = int(re.search(r"^STAGE3_WARMUP = ([0-9_]+)", text, re.M).group(1).replace("_", ""))
     percep = [float(item) for item in re.findall(r"percep_weight: float = ([0-9.]+)", text)]
-    return {"stage3_warmup": warmup, "percep_weight": percep}
+    return {
+        "stage3_warmup": warmup,
+        "percep_weight": percep,
+        "novel_color_unmasked": "mask_frustum_tgt" not in text and "FULL_IMAGE" in text,
+    }
 
 
 def _alpha_hole_grad():
@@ -821,23 +855,26 @@ def cpu_checks():
     criteria["projected variance matches the screen-space formula"] = regularizers[
         "splat_identity"
     ]["matches"]
-    criteria["hole fraction is the share of alpha < 0.5"] = holes["matches"]
-    criteria["frustum mask supervises occlusions and ignores the outside"] = bool(
-        full_view["visibility_color_ignores_occlusions"]
-        and full_view["frustum_color_ignores_outside"]
-        and full_view["frustum_color_sees_occlusions"]
-        and full_view["perceptual_ignores_outside_frustum"]
-        and full_view["alpha_ignores_outside_frustum"]
-        and full_view["perceptual_sees_occlusions"]
-        and full_view["alpha_sees_occlusions"]
-        and full_view["perceptual_grad_outside_frustum"] == 0
-        and full_view["alpha_grad_outside_frustum"] == 0
-        and full_view["perceptual_grad_inside_frustum"] > 0
-        and full_view["alpha_grad_inside_frustum"] > 0
+    criteria["hole fraction is the share of alpha < 0.5"] = bool(
+        holes["matches"] and holes["frustum_masked_differs"]
+    )
+    criteria["novel-view losses train pixels outside the source frustum"] = bool(
+        full_view["color_key"] == losses.FULL_IMAGE
+        and full_view["color_changes_outside"]
+        and full_view["alpha_changes_outside"]
+        and full_view["percep_changes_outside"]
+        and full_view["depth_ignores_outside"]
+        and full_view["color_grad_outside"] > 0
+        and full_view["alpha_grad_outside"] > 0
+        and full_view["percep_grad_outside"] > 0
+        and full_view["frustum_masked_color_grad_outside"] == 0
+        and full_view["frustum_masked_alpha_grad_outside"] == 0
+        and full_view["frustum_masked_percep_grad_outside"] == 0
         and full_view["perceptual_finite"]
         and full_view["wired_finite"]
         and full_view["surgery_matches_backward"]
         and full_view["frozen_depth_terms_are_zero"]
+        and cli["novel_color_unmasked"]
     )
     criteria["depth correction changes depth only when enabled"] = bool(
         depth["init_is_identity"]

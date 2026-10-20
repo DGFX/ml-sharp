@@ -95,6 +95,9 @@ def pair_metrics(metrics, rendering_src, rendering_tgt, batch):
                 rendering_tgt.color, batch["image_tgt"], occluded
             ),
             "hole_fraction": float(losses.hole_fraction(rendering_tgt.alpha)),
+            "hole_fraction_frustum": float(
+                losses.hole_fraction(rendering_tgt.alpha, mask=batch["mask_frustum_tgt"])
+            ),
             "psnr_tgt_visible": psnr(rendering_tgt.color, batch["image_tgt"], visible),
             "color_l1_src": float(
                 losses.color_l1(rendering_src.color, batch["image_src"], torch.ones_like(visible))
