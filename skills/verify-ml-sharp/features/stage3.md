@@ -4,20 +4,20 @@ Continue from the stage 3 run 2 checkpoint, which was trained from stage 2. The 
 
 ## Sub-features
 
-- `stage3 --mode check`: 30 training steps from the stage 3 run 2 checkpoint with every stage 3 loss turned on. Prints steady-state seconds per step and peak GPU memory. Writes `stage3_check.json` with `"passed"`.
-- `stage3 --mode train`: same init, Adam with warmup and cosine decay, novel-view color and disparity still inside the visibility mask, alpha and perceptual on the full novel view, regularizers every step. Wall-clock cap `--max-minutes`. Held-out validation includes the new terms. Checkpoints every `--checkpoint-every` steps and at the end.
-- `stage3 --mode eval`: the stage 2 eval harness. `hole_fraction` is the share of novel-view pixels with rendered alpha below 0.5. `lpips_occluded` is AlexNet LPIPS after the render is replaced by the ground truth outside the occluded region. Side-by-side videos stay Apple on the left and ours on the right.
+- `stage3 --mode check`: 30 training steps from the stage 3 run 2 checkpoint with every stage 3 loss turned on. Prints steady-state seconds per step, peak GPU memory, `grad_clip`, `grad_norm_max` and `clipped_fraction`. Writes `stage3_check.json` with `"passed"`.
+- `stage3 --mode train`: same init, Adam with warmup and cosine decay, novel-view color and disparity still inside the visibility mask, alpha and perceptual on the full novel view, regularizers every step. Wall-clock cap `--max-minutes`. Held-out validation runs on the 8 `ai_011_001` pairs in `val_pairs.json` and includes the new terms. Checkpoints every `--checkpoint-every` steps and at the end.
+- `stage3 --mode eval`: the stage 2 eval harness. `hole_fraction` is the share of novel-view pixels with rendered alpha below 0.5. `hole_fraction_frustum` is the same share inside the input frustum only. `lpips_occluded` is AlexNet LPIPS after the render is replaced by the ground truth outside the occluded region. Side-by-side videos stay Apple on the left and ours on the right.
 
-CPU, before spending GPU time:
+CPU, before spending GPU time (see the CPU checks section of `SKILL.md` for the data):
 
 ```
-PYTHONPATH=src python -m sharp_train.stage3
+PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
 ```
 
 ## How to get to it (user POV)
 
 ```
-PYTHONPATH=src python -m sharp_train.stage3
+PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
 modal run modal_app.py --task stage3 --mode check --run-name stage3-check-<sha>
 modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --steps 8000 --max-minutes 90 --timeout-minutes 120
 modal run modal_app.py --task stage3 --mode eval --run-name stage3-<sha> --checkpoints final
@@ -32,7 +32,7 @@ modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-gri
 
 ## Driving it with modal
 
-`--mode` is `check`, `train` or `eval`. `--init-checkpoint` defaults to `runs/stage3-b29749e/checkpoints/final.pt` on the volume (stage 3 run 2, grid 192). `--grid` rebuilds the predictor at 384 or 768 and loads the decoder weights; the base splat scale shrinks with the grid spacing. `--depth-correction 0` turns the scale map off. `--grad-checkpointing 1` checkpoints the Gaussian decoder. `--backbone-bf16 1` runs the frozen Depth Pro forward in bfloat16 with no gradient. `--gpu` or `STAGE3_GPU` overrides `A100-40GB` (or `H100` at grid 768). `--timeout-minutes` overrides the scaled function timeout (45, 120 and 60 minutes at grid 192 for check, train and eval). Train also takes `--steps` (8000), `--lr` (`1.6e-4`), `--warmup` (300), `--max-minutes`, `--checkpoint-every`, `--val-every`, `--seed`, `--train-scenes`. Eval takes `--checkpoints`.
+`--mode` is `check`, `train` or `eval`. `--init-checkpoint` defaults to `runs/stage3-b29749e/checkpoints/final.pt` on the volume (stage 3 run 2, grid 192). `--grid` rebuilds the predictor at 384 or 768 and loads the decoder weights; the base splat scale shrinks with the grid spacing. `--depth-correction` defaults to 0, the inference depth path, so training and eval see the same depth. `--depth-correction 1` feeds ground truth to the alignment and trains it under the scale losses. `--grad-clip` is the global grad-norm clip (default 1000, 0 turns it off). `--grad-checkpointing 1` checkpoints the Gaussian decoder. `--backbone-bf16 1` runs the frozen Depth Pro forward in bfloat16 with no gradient. `--gpu` or `STAGE3_GPU` overrides `A100-40GB` (or `H100` at grid 768). `--timeout-minutes` overrides the scaled function timeout (45, 120 and 60 minutes at grid 192 for check, train and eval). Train also takes `--steps` (8000), `--lr` (`1.6e-4`), `--warmup` (300), `--max-minutes`, `--checkpoint-every`, `--val-every`, `--seed`, `--train-scenes`. Eval takes `--checkpoints`.
 
 ## Evidence
 
@@ -44,7 +44,7 @@ modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-gri
 ## Gotchas
 
 - The novel-view color loss is still masked. Only alpha and perceptual see the holes. A drop in `hole_fraction` and `lpips_occluded` is the signal that disocclusions are filling in; full-image LPIPS can lag behind.
-- Depth correction is on by default and is already what stage 2 trained. Turning it off is an ablation, not the starting point. Stage 3 freezes that module (`hold_depth_alignment`) so the scale regularizer and the second-layer TV cannot push the stage 2 scale off the ground truth. The scale losses stay in the total at the paper weights.
-- `history.json` `grad_norm` is the norm before `clip_grad_norm_` at 1.0. `train_meta.json` gets `peak_memory_gb` during the loop.
+- Depth correction is off by default in stage 3. Stage 2 trained with it, and run `stage3-b29749e` held that alignment frozen, so the decoder learned on ground-truth-corrected depth and was scored on raw monodepth. Compare a `--depth-correction 1` run against the default on the eval `inference` setting, not on `gt_depth`.
+- `history.json` `grad_norm` is the pre-clip norm of the entry's last step. `grad_norm_mean`, `grad_norm_max` and `clipped_fraction` cover every step since the previous entry. `train_meta.json` records `grad_clip` and gets `peak_memory_gb` during the loop.
 - The perceptual net is an ImageNet ResNet-50, baked into the Modal image. The paper's inpainting ResNet-50 is not used. See `docs/training-spec.md`.
 - Checkpoints still exclude monodepth weights and inherit Apple's research-only model license. Renders are Hypersim: credit Hypersim (CC BY-SA 3.0).

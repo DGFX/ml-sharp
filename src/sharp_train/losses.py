@@ -19,13 +19,9 @@ SPLAT_MIN = 1e-1
 SPLAT_MAX = 1e2
 SPLAT_LOW_PASS = 1e-2
 SCALE_TV_LEVELS = 6
-GRAD_CLIP_NORM = 1.0
+GRAD_CLIP_NORM = 1000.0
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-def clip_gradients(parameters):
-    return torch.nn.utils.clip_grad_norm_(parameters, GRAD_CLIP_NORM)
 
 
 def masked_mean(values, mask):
@@ -73,8 +69,11 @@ def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_we
     return terms
 
 
-def hole_fraction(alpha, threshold=0.5):
-    return (alpha < threshold).float().mean()
+def hole_fraction(alpha, threshold=0.5, mask=None):
+    holes = (alpha < threshold).float()
+    if mask is None:
+        return holes.mean()
+    return masked_mean(holes, mask)
 
 
 def alpha_bce(alpha):
@@ -215,12 +214,18 @@ class PerceptualLoss(nn.Module):
 
 
 def stage3_terms(rendering_src, rendering_tgt, batch, gaussians, state, perceptual):
+    return {
+        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha),
+        "percep": perceptual(rendering_tgt.color, batch["image_tgt"]),
+        **regularizer_terms(batch, gaussians, state),
+    }
+
+
+def regularizer_terms(batch, gaussians, state):
     inverse_depth = 1.0 / state.aligned_depth.clamp(min=1e-4)
     layers, height, width = state.base_x.shape[2:]
     opacities = gaussians.opacities.view(-1, layers, height, width)
     return {
-        "alpha": alpha_bce(rendering_src.alpha) + alpha_bce(rendering_tgt.alpha),
-        "percep": perceptual(rendering_tgt.color, batch["image_tgt"]),
         "tv": total_variation(inverse_depth[:, 1:2]),
         "grad": floater_loss(opacities, inverse_depth[:, :1], state.base_x, state.base_y),
         "delta": offset_hinge(state.delta_xy),

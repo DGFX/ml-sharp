@@ -67,19 +67,19 @@ def train(
     callback=None,
     stage3=None,
     depth_correction=True,
+    grad_clip=losses.GRAD_CLIP_NORM,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = next(predictor.parameters()).device
     predictor.train()
-    if stage3 is not None and depth_correction:
-        model.hold_depth_alignment(predictor)
     parameters = model.trainable_parameters(predictor)
     optimizer = torch.optim.Adam(parameters, lr=lr)
+    max_norm = grad_clip or math.inf
     history = []
     started = time.time()
     iterator = iter(batches)
-    window, window_steps = {}, 0
+    window, window_norms = {}, []
     for step in range(steps):
         try:
             batch = next(iterator)
@@ -98,23 +98,26 @@ def train(
         )
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
-        grad_norm = losses.clip_gradients(parameters)
+        window_norms.append(torch.nn.utils.clip_grad_norm_(parameters, max_norm).detach())
         optimizer.step()
         for key, value in terms.items():
             window[key] = window.get(key, 0.0) + value.detach()
-        window_steps += 1
         out_of_time = max_seconds is not None and time.time() - started > max_seconds
         if step % log_every == 0 or step == steps - 1 or out_of_time:
+            norms = torch.stack(window_norms)
             entry = {
                 "step": step,
                 "lr": optimizer.param_groups[0]["lr"],
-                "grad_norm": float(grad_norm),
-                "window": window_steps,
+                "grad_norm": float(norms[-1]),
+                "grad_norm_mean": float(norms.mean()),
+                "grad_norm_max": float(norms.max()),
+                "clipped_fraction": float((norms > max_norm).float().mean()),
+                "window": len(window_norms),
             }
-            entry.update({key: float(value) / window_steps for key, value in window.items()})
+            entry.update({key: float(value) / len(window_norms) for key, value in window.items()})
             entry["seconds"] = time.time() - started
             history.append(entry)
-            window, window_steps = {}, 0
+            window, window_norms = {}, []
             print(json.dumps(entry), flush=True)
             (out_dir / "history.json").write_text(json.dumps(history, indent=1))
             record_peak_memory(out_dir)
@@ -147,7 +150,6 @@ def record_peak_memory(out_dir):
         return None
     meta = json.loads(path.read_text())
     meta["peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
-    meta["grad_clip"] = losses.GRAD_CLIP_NORM
     path.write_text(json.dumps(meta, indent=1))
     return meta["peak_memory_gb"]
 

@@ -395,7 +395,15 @@ def mean_of(rows, key):
 
 
 def throughput_check(
-    predictor, loader, steps, out_dir, stage3=None, depth_correction=True, lr=1e-4, warmup=5
+    predictor,
+    loader,
+    steps,
+    out_dir,
+    stage3=None,
+    depth_correction=True,
+    lr=1e-4,
+    warmup=5,
+    grad_clip=losses.GRAD_CLIP_NORM,
 ):
     torch.cuda.reset_peak_memory_stats()
     started = None
@@ -421,6 +429,7 @@ def throughput_check(
         callback=callback,
         stage3=stage3,
         depth_correction=depth_correction,
+        grad_clip=grad_clip,
     )
     steady = timings[len(timings) // 2 :]
     return {
@@ -429,6 +438,10 @@ def throughput_check(
         "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
         "first_total": history[0]["total"],
         "last_total": history[-1]["total"],
+        "grad_clip": grad_clip,
+        "grad_norm_max": max(entry["grad_norm_max"] for entry in history),
+        "clipped_fraction": sum(entry["clipped_fraction"] * entry["window"] for entry in history)
+        / sum(entry["window"] for entry in history),
         "last": history[-1],
         "finite": all(math.isfinite(entry["total"]) for entry in history),
     }

@@ -7,10 +7,23 @@ import torch
 from sharp_train import losses, model
 
 EVAL_PAIRS_PATH = Path(__file__).with_name("eval_pairs.json")
+VAL_PAIRS_PATH = Path(__file__).with_name("val_pairs.json")
 
 
 def eval_spec():
     return json.loads(EVAL_PAIRS_PATH.read_text())
+
+
+def val_spec():
+    return json.loads(VAL_PAIRS_PATH.read_text())
+
+
+def held_out_split(data_root, train_scenes=""):
+    spec, val = eval_spec(), val_spec()
+    held_out = {*spec["scenes"], val["scene"]}
+    pairs = json.loads((Path(data_root) / "pairs.json").read_text())
+    scenes = train_scenes.split(",") if train_scenes else sorted({pair["scene"] for pair in pairs})
+    return spec, val, [scene for scene in scenes if scene not in held_out]
 
 
 def build_grid_predictor(
@@ -105,6 +118,9 @@ def pair_metrics(metrics, rendering_src, rendering_tgt, batch):
                 rendering_tgt.color, batch["image_tgt"], occluded
             ),
             "hole_fraction": float(losses.hole_fraction(rendering_tgt.alpha)),
+            "hole_fraction_frustum": float(
+                losses.hole_fraction(rendering_tgt.alpha, mask=batch["mask_frustum_tgt"])
+            ),
             "psnr_tgt_visible": psnr(rendering_tgt.color, batch["image_tgt"], visible),
             "color_l1_src": float(
                 losses.color_l1(rendering_src.color, batch["image_src"], torch.ones_like(visible))
