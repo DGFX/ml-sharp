@@ -11,6 +11,11 @@ DATA_ROOT = VOLUME_ROOT / "hypersim"
 RUNS_ROOT = VOLUME_ROOT / "runs"
 CHECKPOINT_PATH = VOLUME_ROOT / "checkpoints" / "sharp_2572gikvuh.pt"
 GPU = "A100-40GB"
+H100 = "H100"
+BASE_GRID = 192
+BASE_MAX_MINUTES = 50.0
+STAGE3_TIMEOUT_MINUTES = {"check": 45, "train": 120, "eval": 60}
+STAGE2_TIMEOUT_MINUTES = {"checks": 25, "train": 80, "eval": 40}
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.13")
@@ -83,7 +88,38 @@ def volume_path(path):
     return path if path.is_absolute() else VOLUME_ROOT / path
 
 
-STAGE3_INIT = "runs/stage2-29fefbe/checkpoints/final.pt"
+STAGE3_INIT = "runs/stage3-b29749e/checkpoints/final.pt"
+
+
+def budget_scale(grid):
+    return (grid / BASE_GRID) ** 2
+
+
+def resolved_max_minutes(max_minutes, grid):
+    if max_minutes:
+        return max_minutes
+    return BASE_MAX_MINUTES * budget_scale(grid)
+
+
+def resolved_timeout_seconds(timeout_minutes, base_minutes, grid):
+    minutes = timeout_minutes if timeout_minutes else base_minutes * budget_scale(grid)
+    return int(minutes * 60)
+
+
+def resolved_gpu(gpu, grid):
+    chosen = gpu or os.environ.get("STAGE3_GPU")
+    if chosen:
+        return chosen
+    if grid >= 768:
+        return H100
+    return GPU
+
+
+def run_options(base_minutes, grid, gpu, timeout_minutes):
+    return {
+        "gpu": resolved_gpu(gpu, grid),
+        "timeout": resolved_timeout_seconds(timeout_minutes, base_minutes, grid),
+    }
 
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
@@ -183,7 +219,14 @@ def train_loader(scenes, seed):
 
 
 @app.function(gpu=GPU, timeout=25 * 60, volumes={VOLUME_ROOT: volume})
-def stage2_checks(run_name: str, train_scenes: str, grid: int, throughput_steps: int):
+def stage2_checks(
+    run_name: str,
+    train_scenes: str,
+    grid: int,
+    throughput_steps: int,
+    grad_checkpointing: int = 0,
+    backbone_bf16: int = 0,
+):
     import torch
     from sharp_train import checks, model, stage2, train
     from sharp_train.data import HypersimPairs
@@ -197,18 +240,27 @@ def stage2_checks(run_name: str, train_scenes: str, grid: int, throughput_steps:
     report["visibility"] = checks.visibility_check(eval_set, range(len(eval_set)))
     print(json.dumps({"visibility": report["visibility"]["criteria"]}), flush=True)
     batch = train.to_device(torch.utils.data.default_collate([eval_set[0]]), device)
-    apple = model.build_predictor(checkpoint).to(device)
+    apple = model.build_predictor(checkpoint, grad_checkpointing=bool(grad_checkpointing)).to(
+        device
+    )
     report["grid_768_equals_apple"] = checks.grid_equivalence_check(apple, batch)
     report["grid_forward"] = checks.grid_forward_check(apple, batch, grid)
     print(json.dumps({key: report[key] for key in ("grid_768_equals_apple", "grid_forward")}))
     report["gradient_check"] = checks.gradient_check(
-        model.GridPredictor(apple, grid), batch, "/root/repo/src/sharp"
+        model.GridPredictor(apple, grid, backbone_bf16=bool(backbone_bf16)),
+        batch,
+        "/root/repo/src/sharp",
     )
     report["gradient_check"].pop("static_scan")
     print(json.dumps({"gradient_check": report["gradient_check"]}), flush=True)
     del apple
     torch.manual_seed(0)
-    predictor = stage2.build_grid_predictor(checkpoint, grid).to(device)
+    predictor = stage2.build_grid_predictor(
+        checkpoint,
+        grid,
+        grad_checkpointing=bool(grad_checkpointing),
+        backbone_bf16=bool(backbone_bf16),
+    ).to(device)
     report["reset_decoder"] = checks.reset_decoder_check(predictor, batch)
     print(json.dumps({"reset_decoder": report["reset_decoder"]}), flush=True)
     _, loader = train_loader(scenes, 0)
@@ -241,6 +293,8 @@ def stage2_train(
     checkpoint_every: int,
     val_every: int,
     seed: int,
+    grad_checkpointing: int = 0,
+    backbone_bf16: int = 0,
 ):
     import torch
     from sharp_train import stage2, train, viz
@@ -252,7 +306,12 @@ def stage2_train(
     train_set, loader = train_loader(scenes, seed)
     validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
     torch.manual_seed(seed)
-    predictor = stage2.build_grid_predictor(checkpoint, grid).to(device)
+    predictor = stage2.build_grid_predictor(
+        checkpoint,
+        grid,
+        grad_checkpointing=bool(grad_checkpointing),
+        backbone_bf16=bool(backbone_bf16),
+    ).to(device)
     meta = {
         "grid": grid,
         "input_resolution": predictor.input_resolution,
@@ -264,6 +323,8 @@ def stage2_train(
         "warmup": warmup,
         "seed": seed,
         "gpu": torch.cuda.get_device_name(),
+        "grad_checkpointing": bool(grad_checkpointing),
+        "backbone_bf16": bool(backbone_bf16),
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
     val_history = [{"step": 0, **stage2.validation_loss(predictor, validation, device)}]
@@ -367,21 +428,38 @@ def stage2_eval(run_name: str, checkpoints: str):
     return evaluate_run(run_name, checkpoints)
 
 
-def load_stage3_predictor(apple_checkpoint, init_checkpoint, grid, device):
+def load_stage3_predictor(
+    apple_checkpoint,
+    init_checkpoint,
+    grid,
+    device,
+    grad_checkpointing=False,
+    backbone_bf16=False,
+):
     from sharp_train import stage2
 
     path = volume_path(init_checkpoint)
     if not path.exists():
         raise FileNotFoundError(f"missing init checkpoint: {path}")
-    predictor, step = stage2.load_checkpoint(apple_checkpoint, path)
-    if predictor.grid != grid:
-        raise ValueError(f"checkpoint grid {predictor.grid} does not match --grid {grid}")
+    predictor, step = stage2.load_checkpoint(
+        apple_checkpoint,
+        path,
+        grid=grid,
+        grad_checkpointing=grad_checkpointing,
+        backbone_bf16=backbone_bf16,
+    )
     return predictor.to(device), step, path
 
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
 def stage3_check(
-    run_name: str, train_scenes: str, grid: int, init_checkpoint: str, depth_correction: int
+    run_name: str,
+    train_scenes: str,
+    grid: int,
+    init_checkpoint: str,
+    depth_correction: int,
+    grad_checkpointing: int = 0,
+    backbone_bf16: int = 0,
 ):
     import math
 
@@ -392,7 +470,12 @@ def stage3_check(
     out_dir = RUNS_ROOT / run_name
     apple_checkpoint = ensure_checkpoint()
     predictor, init_step, init_path = load_stage3_predictor(
-        apple_checkpoint, init_checkpoint, grid, device
+        apple_checkpoint,
+        init_checkpoint,
+        grid,
+        device,
+        grad_checkpointing=bool(grad_checkpointing),
+        backbone_bf16=bool(backbone_bf16),
     )
     _, scenes = held_out_split(train_scenes)
     _, loader = train_loader(scenes, 0)
@@ -449,6 +532,8 @@ def stage3_train(
     seed: int,
     init_checkpoint: str,
     depth_correction: int,
+    grad_checkpointing: int = 0,
+    backbone_bf16: int = 0,
 ):
     import torch
     from sharp_train import losses, stage2, stage3, train, viz
@@ -461,7 +546,12 @@ def stage3_train(
     validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
     torch.manual_seed(seed)
     predictor, init_step, init_path = load_stage3_predictor(
-        apple_checkpoint, init_checkpoint, grid, device
+        apple_checkpoint,
+        init_checkpoint,
+        grid,
+        device,
+        grad_checkpointing=bool(grad_checkpointing),
+        backbone_bf16=bool(backbone_bf16),
     )
     loss = stage3.Stage3Loss(device)
     correction = bool(depth_correction)
@@ -482,6 +572,10 @@ def stage3_train(
         "hold_depth_alignment": correction,
         "grad_clip": losses.GRAD_CLIP_NORM,
         "weights": losses.STAGE3_WEIGHTS,
+        "source_grid": predictor.source_grid,
+        "scale_prior_ratio": predictor.scale_prior_ratio,
+        "grad_checkpointing": bool(grad_checkpointing),
+        "backbone_bf16": bool(backbone_bf16),
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
     val_history = [
@@ -563,7 +657,7 @@ def main(
     steps: int = 8000,
     lr: float = 1.6e-4,
     warmup: int = 300,
-    max_minutes: float = 50.0,
+    max_minutes: float = 0,
     checkpoint_every: int = 2000,
     val_every: int = 500,
     seed: int = 0,
@@ -574,57 +668,91 @@ def main(
     timeout_minutes: float = 0,
     init_checkpoint: str = STAGE3_INIT,
     depth_correction: int = 1,
+    grad_checkpointing: int = 0,
+    backbone_bf16: int = 0,
 ):
+    minutes = resolved_max_minutes(max_minutes, grid)
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
     if task == "stage2-checks":
-        print(stage2_checks.remote(run_name, train_scenes, grid, throughput_steps))
+        print(
+            stage2_checks.with_options(
+                **run_options(STAGE2_TIMEOUT_MINUTES["checks"], grid, gpu, timeout_minutes)
+            ).remote(
+                run_name,
+                train_scenes,
+                grid,
+                throughput_steps,
+                grad_checkpointing,
+                backbone_bf16,
+            )
+        )
     if task == "stage2-train":
         print(
-            stage2_train.remote(
+            stage2_train.with_options(
+                **run_options(STAGE2_TIMEOUT_MINUTES["train"], grid, gpu, timeout_minutes)
+            ).remote(
                 run_name,
                 train_scenes,
                 grid,
                 steps,
                 lr,
                 warmup,
-                max_minutes,
+                minutes,
                 checkpoint_every,
                 val_every,
                 seed,
+                grad_checkpointing,
+                backbone_bf16,
             )
         )
     if task == "stage2-eval":
-        print(stage2_eval.remote(run_name, checkpoints))
+        print(
+            stage2_eval.with_options(
+                **run_options(STAGE2_TIMEOUT_MINUTES["eval"], grid, gpu, timeout_minutes)
+            ).remote(run_name, checkpoints)
+        )
     if task == "stage3":
-        chosen = gpu or os.environ.get("STAGE3_GPU") or GPU
-        options = {"gpu": chosen}
-        if timeout_minutes:
-            options["timeout"] = int(timeout_minutes * 60)
         if mode == "check":
             print(
-                stage3_check.with_options(**options).remote(
-                    run_name, train_scenes, grid, init_checkpoint, depth_correction
+                stage3_check.with_options(
+                    **run_options(STAGE3_TIMEOUT_MINUTES["check"], grid, gpu, timeout_minutes)
+                ).remote(
+                    run_name,
+                    train_scenes,
+                    grid,
+                    init_checkpoint,
+                    depth_correction,
+                    grad_checkpointing,
+                    backbone_bf16,
                 )
             )
         elif mode == "train":
             print(
-                stage3_train.with_options(**options).remote(
+                stage3_train.with_options(
+                    **run_options(STAGE3_TIMEOUT_MINUTES["train"], grid, gpu, timeout_minutes)
+                ).remote(
                     run_name,
                     train_scenes,
                     grid,
                     steps,
                     lr,
                     warmup,
-                    max_minutes,
+                    minutes,
                     checkpoint_every,
                     val_every,
                     seed,
                     init_checkpoint,
                     depth_correction,
+                    grad_checkpointing,
+                    backbone_bf16,
                 )
             )
         elif mode == "eval":
-            print(stage3_eval.with_options(**options).remote(run_name, checkpoints))
+            print(
+                stage3_eval.with_options(
+                    **run_options(STAGE3_TIMEOUT_MINUTES["eval"], grid, gpu, timeout_minutes)
+                ).remote(run_name, checkpoints)
+            )
         else:
             raise ValueError(f"unknown stage3 mode {mode}")

@@ -2,12 +2,9 @@ import json
 import math
 from pathlib import Path
 
-import imageio
-import numpy as np
 import torch
 
-from sharp_train import losses, model, render, train, viz
-from sharp_train.data import HypersimPairs
+from sharp_train import losses, model
 
 EVAL_PAIRS_PATH = Path(__file__).with_name("eval_pairs.json")
 
@@ -16,11 +13,13 @@ def eval_spec():
     return json.loads(EVAL_PAIRS_PATH.read_text())
 
 
-def build_grid_predictor(checkpoint, grid, reset_decoder=True):
-    predictor = model.build_predictor(checkpoint)
+def build_grid_predictor(
+    checkpoint, grid, reset_decoder=True, grad_checkpointing=False, backbone_bf16=False
+):
+    predictor = model.build_predictor(checkpoint, grad_checkpointing=grad_checkpointing)
     if reset_decoder:
         model.reset_gaussian_decoder(predictor)
-    return model.GridPredictor(predictor, grid)
+    return model.GridPredictor(predictor, grid, backbone_bf16=backbone_bf16)
 
 
 def trained_state(grid_predictor):
@@ -45,15 +44,26 @@ def save_checkpoint(grid_predictor, path, step, extra=None):
     partial.rename(path)
 
 
-def load_checkpoint(apple_checkpoint, path):
+def load_checkpoint(
+    apple_checkpoint, path, grid=None, grad_checkpointing=False, backbone_bf16=False
+):
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    grid_predictor = build_grid_predictor(apple_checkpoint, payload["grid"])
+    source_grid = payload["grid"]
+    target_grid = source_grid if grid is None else grid
+    grid_predictor = build_grid_predictor(
+        apple_checkpoint,
+        target_grid,
+        reset_decoder=False,
+        grad_checkpointing=grad_checkpointing,
+        backbone_bf16=backbone_bf16,
+    )
     result = grid_predictor.predictor.load_state_dict(payload["state_dict"], strict=False)
     unexpected_missing = [
         name for name in result.missing_keys if not name.startswith("monodepth_model.")
     ]
     if unexpected_missing or result.unexpected_keys:
         raise KeyError(f"checkpoint mismatch: {unexpected_missing} {result.unexpected_keys}")
+    model.rescale_base_scale(grid_predictor, source_grid)
     return grid_predictor, payload["step"]
 
 
@@ -115,6 +125,8 @@ def pair_metrics(metrics, rendering_src, rendering_tgt, batch):
 
 
 def comparison_rows(batch, renders):
+    from sharp_train import viz
+
     max_disparity = float(
         torch.quantile(
             (1.0 / torch.nan_to_num(batch["depth_src"][0], nan=1e6).clamp(min=1e-3)).flatten()[
@@ -137,6 +149,8 @@ def comparison_rows(batch, renders):
 
 @torch.no_grad()
 def evaluate(predictors, dataset, device, out_dir, settings=("inference", "gt_depth"), images=6):
+    from sharp_train import render, train, viz
+
     metrics = PerceptualMetrics(device)
     out_dir = Path(out_dir)
     results = {setting: {name: [] for name in predictors} for setting in settings}
@@ -210,6 +224,8 @@ def camera_path(median_depth, frames, radius_ratio, device):
 
 
 def write_video(frames, path, fps=30):
+    import imageio
+
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7, macro_block_size=8)
     for frame in frames:
@@ -227,6 +243,10 @@ def downscale(frame, factor):
 
 @torch.no_grad()
 def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius_ratio=0.06):
+    import numpy as np
+
+    from sharp_train import render, train, viz
+
     batch = train.to_device(torch.utils.data.default_collate([dataset[index]]), device)
     _, _, height, width = batch["image_src"].shape
     name = batch["name"][0]
@@ -265,6 +285,8 @@ def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius
 
 @torch.no_grad()
 def validation_loss(predictor, batches, device, stage3=None, depth_correction=True):
+    from sharp_train import train
+
     was_training = predictor.training
     predictor.eval()
     totals = {}
@@ -283,6 +305,8 @@ def validation_loss(predictor, batches, device, stage3=None, depth_correction=Tr
 
 
 def validation_batches(data_root, names):
+    from sharp_train.data import HypersimPairs
+
     dataset = HypersimPairs(data_root, names=names)
     return [torch.utils.data.default_collate([dataset[index]]) for index in range(len(dataset))]
 
