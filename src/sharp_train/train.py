@@ -14,13 +14,30 @@ def to_device(batch, device):
     }
 
 
-def forward_pair(predictor, batch, mask_key=None, delta_hook=None):
+def forward_pair(
+    predictor, batch, mask_key=None, delta_hook=None, stage3=None, depth_correction=True
+):
     _, _, height, width = batch["image_src"].shape
     gaussians = model.predict(
-        predictor, batch["image_src"], batch["focal_px"], batch["depth_src"], delta_hook=delta_hook
+        predictor,
+        batch["image_src"],
+        batch["focal_px"],
+        batch["depth_src"],
+        delta_hook=delta_hook,
+        depth_correction=depth_correction,
     )
     rendering_src, rendering_tgt = render.render_pair(gaussians, batch, width, height)
     terms = losses.pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=mask_key)
+    if stage3 is not None:
+        extra = losses.stage3_terms(
+            rendering_src,
+            rendering_tgt,
+            batch,
+            gaussians,
+            predictor.training_state,
+            stage3.perceptual,
+        )
+        terms = losses.add_stage3(terms, extra)
     return terms, rendering_src, rendering_tgt
 
 
@@ -48,11 +65,15 @@ def train(
     snapshot_batch=None,
     max_seconds=None,
     callback=None,
+    stage3=None,
+    depth_correction=True,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = next(predictor.parameters()).device
     predictor.train()
+    if stage3 is not None and depth_correction:
+        model.hold_depth_alignment(predictor)
     parameters = model.trainable_parameters(predictor)
     optimizer = torch.optim.Adam(parameters, lr=lr)
     history = []
@@ -68,10 +89,16 @@ def train(
         batch = to_device(batch, device)
         for group in optimizer.param_groups:
             group["lr"] = cosine_lr(step, steps, lr, warmup)
-        terms, _, _ = forward_pair(predictor, batch, mask_key=mask_key)
+        terms, _, _ = forward_pair(
+            predictor,
+            batch,
+            mask_key=mask_key,
+            stage3=stage3,
+            depth_correction=depth_correction,
+        )
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+        grad_norm = losses.clip_gradients(parameters)
         optimizer.step()
         for key, value in terms.items():
             window[key] = window.get(key, 0.0) + value.detach()
@@ -90,21 +117,46 @@ def train(
             window, window_steps = {}, 0
             print(json.dumps(entry), flush=True)
             (out_dir / "history.json").write_text(json.dumps(history, indent=1))
+            record_peak_memory(out_dir)
         if snapshot_every and snapshot_batch is not None and (step + 1) % snapshot_every == 0:
-            snapshot(predictor, snapshot_batch, out_dir / f"snapshot_{step + 1:06d}.png", mask_key)
+            snapshot(
+                predictor,
+                snapshot_batch,
+                out_dir / f"snapshot_{step + 1:06d}.png",
+                mask_key,
+                stage3,
+                depth_correction,
+            )
             predictor.train()
         if callback is not None:
+            record_peak_memory(out_dir)
             callback(step, out_of_time or step == steps - 1)
         if out_of_time:
             print(f"stopping at step {step}: time budget reached", flush=True)
             break
     (out_dir / "history.json").write_text(json.dumps(history, indent=1))
+    record_peak_memory(out_dir)
     return history
 
 
+def record_peak_memory(out_dir):
+    if not torch.cuda.is_available():
+        return None
+    path = Path(out_dir) / "train_meta.json"
+    if not path.exists():
+        return None
+    meta = json.loads(path.read_text())
+    meta["peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
+    meta["grad_clip"] = losses.GRAD_CLIP_NORM
+    path.write_text(json.dumps(meta, indent=1))
+    return meta["peak_memory_gb"]
+
+
 @torch.no_grad()
-def snapshot(predictor, batch, path, mask_key=None):
+def snapshot(predictor, batch, path, mask_key=None, stage3=None, depth_correction=True):
     predictor.eval()
-    terms, rendering_src, rendering_tgt = forward_pair(predictor, batch, mask_key=mask_key)
+    terms, rendering_src, rendering_tgt = forward_pair(
+        predictor, batch, mask_key=mask_key, stage3=stage3, depth_correction=depth_correction
+    )
     viz.save_pair_grid(batch, rendering_src, rendering_tgt, path)
     return summarize(terms)
