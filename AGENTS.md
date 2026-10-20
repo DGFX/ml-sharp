@@ -23,7 +23,7 @@ These are our stages, not the paper's two-stage curriculum.
 | Stage | Goal | Status |
 | --- | --- | --- |
 | 1 | Prove the training loop: view-pair loader, forward, gsplat render in both views, L1 on color and disparity. Gradient check, Apple-weights check, overfit check. | `skills/verify-ml-sharp` |
-| 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-train` then `--task stage2-eval` |
+| 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks`, then `--task stage2-train`, then `--task stage2-eval` |
 | 3 | Full losses: perceptual (feature + Gram) on the novel view, alpha BCE, regularizers, depth adjustment losses. Needs an 80 GB GPU. | not started |
 
 ## Where things run
@@ -46,7 +46,7 @@ These are our stages, not the paper's two-stage curriculum.
 
 - Code in `src/sharp` and the repo: Apple sample-code license in [LICENSE](LICENSE). Changes are allowed; keep Apple's notice.
 - Apple's released weights (`sharp_2572gikvuh.pt`): [LICENSE_MODEL](LICENSE_MODEL), research use only, no commercial use. Weights we train starting from Apple's weights, including the monodepth backbone we freeze, inherit that restriction.
-- Hypersim: dataset under CC BY-SA 3.0, code under Apple's sample-code license. Credit Hypersim (Roberts et al., ICCV 2021) wherever renders are shown. Data is never committed; it lives on the Modal volume.
+- Hypersim: dataset under CC BY-SA 3.0, code under Apple's sample-code license. Credit Hypersim (Roberts et al., ICCV 2021) wherever renders are shown. Details in [docs/training-spec.md](docs/training-spec.md#data-and-license). Data is never committed; it lives on the Modal volume.
 
 ## Commands
 
@@ -59,6 +59,7 @@ These are our stages, not the paper's two-stage curriculum.
 | `npm run skills:check` | Vendored skills match `skills.lock` |
 | `python scripts/prepare_hypersim.py --out DIR --scenes ai_001_001 ...` | Download a Hypersim subset by HTTP range requests and convert it |
 | `modal run modal_app.py --task stage1` | Stage 1 checks |
+| `python scripts/pick_eval_pairs.py --pairs DIR/pairs.json` | Regenerate the fixed eval list `src/sharp_train/eval_pairs.json` |
 
 ## Always on
 
