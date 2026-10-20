@@ -72,6 +72,8 @@ def train(
     out_dir.mkdir(parents=True, exist_ok=True)
     device = next(predictor.parameters()).device
     predictor.train()
+    if stage3 is not None and depth_correction:
+        model.hold_depth_alignment(predictor)
     parameters = model.trainable_parameters(predictor)
     optimizer = torch.optim.Adam(parameters, lr=lr)
     history = []
@@ -96,7 +98,7 @@ def train(
         )
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+        grad_norm = losses.clip_gradients(parameters)
         optimizer.step()
         for key, value in terms.items():
             window[key] = window.get(key, 0.0) + value.detach()
@@ -115,6 +117,7 @@ def train(
             window, window_steps = {}, 0
             print(json.dumps(entry), flush=True)
             (out_dir / "history.json").write_text(json.dumps(history, indent=1))
+            record_peak_memory(out_dir)
         if snapshot_every and snapshot_batch is not None and (step + 1) % snapshot_every == 0:
             snapshot(
                 predictor,
@@ -126,12 +129,27 @@ def train(
             )
             predictor.train()
         if callback is not None:
+            record_peak_memory(out_dir)
             callback(step, out_of_time or step == steps - 1)
         if out_of_time:
             print(f"stopping at step {step}: time budget reached", flush=True)
             break
     (out_dir / "history.json").write_text(json.dumps(history, indent=1))
+    record_peak_memory(out_dir)
     return history
+
+
+def record_peak_memory(out_dir):
+    if not torch.cuda.is_available():
+        return None
+    path = Path(out_dir) / "train_meta.json"
+    if not path.exists():
+        return None
+    meta = json.loads(path.read_text())
+    meta["peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
+    meta["grad_clip"] = losses.GRAD_CLIP_NORM
+    path.write_text(json.dumps(meta, indent=1))
+    return meta["peak_memory_gb"]
 
 
 @torch.no_grad()

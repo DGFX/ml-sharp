@@ -44,6 +44,7 @@ STAGE3_GPU=A100-80GB modal run modal_app.py --task stage3 --mode check --run-nam
 ## Gotchas
 
 - The novel-view color loss is still masked. Only alpha and perceptual see the holes. A drop in `hole_fraction` and `lpips_occluded` is the signal that disocclusions are filling in; full-image LPIPS can lag behind.
-- Depth correction is on by default and is already what stage 2 trained. Turning it off is an ablation, not the starting point.
+- Depth correction is on by default and is already what stage 2 trained. Turning it off is an ablation, not the starting point. Stage 3 freezes that module (`hold_depth_alignment`) so the scale regularizer and the second-layer TV cannot push the stage 2 scale off the ground truth. The scale losses stay in the total at the paper weights.
+- `history.json` `grad_norm` is the norm before `clip_grad_norm_` at 1.0. `train_meta.json` gets `peak_memory_gb` during the loop.
 - The perceptual net is an ImageNet ResNet-50, baked into the Modal image. The paper's inpainting ResNet-50 is not used. See `docs/training-spec.md`.
 - Checkpoints still exclude monodepth weights and inherit Apple's research-only model license. Renders are Hypersim: credit Hypersim (CC BY-SA 3.0).

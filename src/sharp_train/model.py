@@ -33,6 +33,16 @@ def align_depth(alignment, monodepth, gt_depth, features, enabled):
     return corrected, scale[:, :1]
 
 
+def hold_depth_alignment(predictor):
+    alignment = predictor
+    if isinstance(predictor, GridPredictor):
+        alignment = predictor.predictor.depth_alignment
+    elif hasattr(predictor, "depth_alignment"):
+        alignment = predictor.depth_alignment
+    alignment.requires_grad_(False)
+    return alignment
+
+
 def build_predictor(checkpoint=None, grad_checkpointing=False):
     params = PredictorParams()
     params.gaussian_decoder.grad_checkpointing = grad_checkpointing

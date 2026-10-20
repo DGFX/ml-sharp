@@ -19,8 +19,13 @@ SPLAT_MIN = 1e-1
 SPLAT_MAX = 1e2
 SPLAT_LOW_PASS = 1e-2
 SCALE_TV_LEVELS = 6
+GRAD_CLIP_NORM = 1.0
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def clip_gradients(parameters):
+    return torch.nn.utils.clip_grad_norm_(parameters, GRAD_CLIP_NORM)
 
 
 def masked_mean(values, mask):

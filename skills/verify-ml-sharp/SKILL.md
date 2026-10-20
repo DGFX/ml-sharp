@@ -72,7 +72,7 @@ Stage 3 losses are also checked on CPU, without a GPU and without gsplat, at tin
 PYTHONPATH=src python -m sharp_train.stage3
 ```
 
-The JSON line has `"passed"` at the top. It checks that each new loss is finite and has a gradient, that alpha and perceptual respond to novel-view pixels outside the visibility mask, that the hole fraction equals the share of alpha below 0.5, and that the depth-correction module changes depth only when it is enabled. This does not replace the Modal run.
+The JSON line has `"passed"` at the top. It checks that each new loss is finite and has a gradient, that alpha and perceptual respond to novel-view pixels outside the visibility mask, that the hole fraction equals the share of alpha below 0.5, and that depth correction is the identity at init. It also checks that the scale regularizer plus second-layer TV move a ground-truth scale off the ground truth, and that `hold_depth_alignment` (what stage 3 training calls) leaves that depth and the base Gaussian depth unchanged. Perceptual weight 3 has to dominate the total, and the global grad clip is 1. This does not replace the Modal run.
 
 ## Helpers
 

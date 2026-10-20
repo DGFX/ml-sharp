@@ -479,6 +479,8 @@ def stage3_train(
         "init_checkpoint": str(init_path),
         "init_step": init_step,
         "depth_correction": correction,
+        "hold_depth_alignment": correction,
+        "grad_clip": losses.GRAD_CLIP_NORM,
         "weights": losses.STAGE3_WEIGHTS,
     }
     stage2.save_json(out_dir / "train_meta.json", meta)
