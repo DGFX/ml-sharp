@@ -93,3 +93,9 @@ Our codebase is built using multiple opensource contributions, please see [ACKNO
 
 Please check out the repository [LICENSE](LICENSE) before using the provided code and
 [LICENSE_MODEL](LICENSE_MODEL) for the released models.
+
+## DGFX training fork
+
+This fork adds training code for SHARP in `src/sharp_train`, a Modal app in `modal_app.py`, a Hypersim prep script in `scripts/`, and the paper in `docs/paper/`. See [AGENTS.md](AGENTS.md) for the stage plan, where things run and the budget rules.
+
+Licenses: Apple's code license ([LICENSE](LICENSE)) covers the code. Apple's weights ([LICENSE_MODEL](LICENSE_MODEL)) are for research use only, and so is anything we fine-tune from them. Hypersim is CC BY-SA 3.0.
