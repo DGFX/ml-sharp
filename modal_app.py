@@ -140,95 +140,209 @@ def stage1(
     return {"passed": report["passed"], "out_dir": str(out_dir)}
 
 
-def eval_indices(dataset, count):
-    stride = max(len(dataset) // count, 1)
-    return list(range(0, len(dataset), stride))[:count]
+def held_out_split(train_scenes):
+    from sharp_train import stage2
+
+    spec = stage2.eval_spec()
+    all_scenes = sorted(
+        {pair["scene"] for pair in json.loads((DATA_ROOT / "pairs.json").read_text())}
+    )
+    scenes = train_scenes.split(",") if train_scenes else all_scenes
+    scenes = [scene for scene in scenes if scene not in spec["scenes"]]
+    return spec, scenes
 
 
-@app.function(gpu=GPU, timeout=60 * 60, volumes={VOLUME_ROOT: volume})
-def stage2_train(
-    run_name: str,
-    train_scenes: str,
-    eval_scenes: str,
-    grid: int,
-    steps: int,
-    lr: float,
-    max_minutes: float,
-):
+def train_loader(scenes, seed):
     import torch
-    from sharp_train import stage2, train
+    from sharp_train.data import HypersimPairs
+
+    dataset = HypersimPairs(DATA_ROOT, scenes=scenes)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=6,
+        drop_last=True,
+        persistent_workers=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+    return dataset, loader
+
+
+@app.function(gpu=GPU, timeout=25 * 60, volumes={VOLUME_ROOT: volume})
+def stage2_checks(run_name: str, train_scenes: str, grid: int, throughput_steps: int):
+    import torch
+    from sharp_train import checks, model, stage2, train
     from sharp_train.data import HypersimPairs
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
     checkpoint = ensure_checkpoint()
-    train_set = HypersimPairs(DATA_ROOT, scenes=train_scenes.split(","))
-    eval_set = HypersimPairs(DATA_ROOT, scenes=eval_scenes.split(","))
-    loader = torch.utils.data.DataLoader(
-        train_set,
-        batch_size=1,
-        shuffle=True,
-        num_workers=4,
-        drop_last=True,
-        persistent_workers=True,
-    )
+    spec, scenes = held_out_split(train_scenes)
+    eval_set = HypersimPairs(DATA_ROOT, names=spec["pairs"])
+    report = {"gpu": torch.cuda.get_device_name(), "train_scenes": scenes}
+    report["visibility"] = checks.visibility_check(eval_set, range(len(eval_set)))
+    print(json.dumps({"visibility": report["visibility"]["criteria"]}), flush=True)
+    batch = train.to_device(torch.utils.data.default_collate([eval_set[0]]), device)
+    apple = model.build_predictor(checkpoint).to(device)
+    report["grid_768_equals_apple"] = checks.grid_equivalence_check(apple, batch)
+    report["grid_forward"] = checks.grid_forward_check(apple, batch, grid)
+    print(json.dumps({key: report[key] for key in ("grid_768_equals_apple", "grid_forward")}))
+    del apple
+    torch.manual_seed(0)
     predictor = stage2.build_grid_predictor(checkpoint, grid).to(device)
-    snapshot_batch = train.to_device(
-        torch.utils.data.default_collate([eval_set[eval_indices(eval_set, 4)[1]]]), device
+    report["gradient_check"] = checks.gradient_check(predictor, batch, "/root/repo/src/sharp")
+    report["gradient_check"].pop("static_scan")
+    print(json.dumps({"gradient_check": report["gradient_check"]}), flush=True)
+    _, loader = train_loader(scenes, 0)
+    report["throughput"] = checks.throughput_check(
+        predictor, loader, throughput_steps, out_dir / "throughput"
     )
+    print(json.dumps({"throughput": report["throughput"]}), flush=True)
+    report["passed"] = bool(
+        report["visibility"]["passed"]
+        and report["grid_768_equals_apple"]["passed"]
+        and report["grid_forward"]["passed"]
+        and report["gradient_check"]["passed"]
+        and report["throughput"]["finite"]
+    )
+    write_json(out_dir / "stage2_checks.json", report)
+    volume.commit()
+    return {"passed": report["passed"], "throughput": report["throughput"]}
+
+
+@app.function(gpu=GPU, timeout=80 * 60, volumes={VOLUME_ROOT: volume})
+def stage2_train(
+    run_name: str,
+    train_scenes: str,
+    grid: int,
+    steps: int,
+    lr: float,
+    warmup: int,
+    max_minutes: float,
+    checkpoint_every: int,
+    val_every: int,
+    seed: int,
+):
+    import torch
+    from sharp_train import stage2, train, viz
+
+    device = cuda_setup()
+    out_dir = RUNS_ROOT / run_name
+    checkpoint = ensure_checkpoint()
+    spec, scenes = held_out_split(train_scenes)
+    train_set, loader = train_loader(scenes, seed)
+    validation = stage2.validation_batches(DATA_ROOT, spec["validation_pairs"])
+    torch.manual_seed(seed)
+    predictor = stage2.build_grid_predictor(checkpoint, grid).to(device)
+    meta = {
+        "grid": grid,
+        "input_resolution": predictor.input_resolution,
+        "train_scenes": scenes,
+        "train_pairs": len(train_set),
+        "validation_pairs": spec["validation_pairs"],
+        "steps": steps,
+        "lr": lr,
+        "warmup": warmup,
+        "seed": seed,
+        "gpu": torch.cuda.get_device_name(),
+    }
+    stage2.save_json(out_dir / "train_meta.json", meta)
+    val_history = [{"step": 0, **stage2.validation_loss(predictor, validation, device)}]
+    print(json.dumps({"validation": val_history[-1]}), flush=True)
+
+    def callback(step, last):
+        done = step + 1
+        if done % val_every == 0 or last:
+            val_history.append(
+                {"step": done, **stage2.validation_loss(predictor, validation, device)}
+            )
+            print(json.dumps({"validation": val_history[-1]}), flush=True)
+            stage2.save_json(out_dir / "val_history.json", val_history)
+        if done % checkpoint_every == 0 or last:
+            name = "final" if last else f"step_{done:06d}"
+            stage2.save_checkpoint(
+                predictor, out_dir / "checkpoints" / f"{name}.pt", done, {"meta": meta}
+            )
+            volume.commit()
+
     history = train.train(
         predictor,
         loader,
         steps,
         out_dir,
         lr=lr,
-        warmup=100,
+        warmup=warmup,
         mask_key="mask_visible_tgt",
-        log_every=25,
-        snapshot_every=max(steps // 4, 1),
-        snapshot_batch=snapshot_batch,
+        log_every=50,
         max_seconds=max_minutes * 60,
+        callback=callback,
     )
-    torch.save(
-        {name: value for name, value in predictor.state_dict().items() if "monodepth" not in name},
-        out_dir / "decoder.pt",
-    )
-    from sharp_train import viz
-
     viz.save_curve(
         history,
         ["total", "color_src", "color_tgt", "depth_tgt"],
         out_dir / "train_curve.png",
-        run_name,
+        f"{run_name} train",
     )
-    stage2.save_json(out_dir / "train_meta.json", {"train_pairs": len(train_set), "grid": grid})
+    viz.save_curve(
+        val_history,
+        ["total", "color_src", "color_tgt", "depth_tgt"],
+        out_dir / "val_curve.png",
+        f"{run_name} held-out validation",
+    )
+    stage2.save_json(out_dir / "val_history.json", val_history)
     volume.commit()
-    first, last = history[0], history[-1]
-    return {"steps": last["step"] + 1, "first": first, "last": last, "train_pairs": len(train_set)}
+    return {
+        "steps": history[-1]["step"] + 1,
+        "train_first": history[0],
+        "train_last": history[-1],
+        "val_first": val_history[0],
+        "val_last": val_history[-1],
+        "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
+    }
 
 
-@app.function(gpu=GPU, timeout=30 * 60, volumes={VOLUME_ROOT: volume})
-def stage2_eval(run_name: str, eval_scenes: str, grid: int, num_pairs: int, video_pair: int):
+@app.function(gpu=GPU, timeout=40 * 60, volumes={VOLUME_ROOT: volume})
+def stage2_eval(run_name: str, checkpoints: str):
     import torch
     from sharp_train import model, stage2
     from sharp_train.data import HypersimPairs
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
-    checkpoint = ensure_checkpoint()
-    eval_set = HypersimPairs(DATA_ROOT, scenes=eval_scenes.split(","))
-    ours = stage2.build_grid_predictor(checkpoint, grid)
-    ours.load_state_dict(torch.load(out_dir / "decoder.pt", map_location="cpu"), strict=False)
-    apple = model.build_predictor(checkpoint)
-    predictors = {"apple_768": apple.to(device), f"ours_{grid}": ours.to(device)}
-    indices = eval_indices(eval_set, num_pairs)
-    report = stage2.evaluate(predictors, eval_set, indices, device, out_dir / "eval")
-    report["video"] = stage2.render_video(
-        predictors, eval_set, indices[video_pair], device, out_dir / "eval" / "camera_move.mp4"
-    )
-    stage2.save_json(out_dir / "eval" / "report.json", report)
-    volume.commit()
-    return {"mean": report["mean"], "video": report["video"]}
+    apple_checkpoint = ensure_checkpoint()
+    spec = stage2.eval_spec()
+    eval_set = HypersimPairs(DATA_ROOT, names=spec["pairs"])
+    video_indices = [spec["pairs"].index(name) for name in spec["video_pairs"]]
+    apple = model.build_predictor(apple_checkpoint).to(device)
+    summaries = {}
+    for name in checkpoints.split(","):
+        ours, step = stage2.load_checkpoint(
+            apple_checkpoint, out_dir / "checkpoints" / f"{name}.pt"
+        )
+        ours = ours.to(device)
+        label = f"ours_{ours.grid}_step{step}"
+        predictors = {
+            "apple_768": apple,
+            f"apple_decoder_{ours.grid}": model.GridPredictor(apple, ours.grid),
+            label: ours,
+        }
+        eval_dir = out_dir / "eval" / name
+        report = stage2.evaluate(predictors, eval_set, device, eval_dir)
+        report["checkpoint"] = {"name": name, "step": step, "grid": ours.grid}
+        report["videos"] = [
+            stage2.render_videos(
+                {"apple_768": apple, label: ours}, eval_set, index, device, eval_dir
+            )
+            for index in video_indices
+        ]
+        stage2.save_json(eval_dir / "report.json", report)
+        volume.commit()
+        summaries[name] = report["mean"]
+        print(json.dumps({name: report["mean"]}), flush=True)
+        del ours
+        torch.cuda.empty_cache()
+    return summaries
 
 
 @app.local_entrypoint()
@@ -241,17 +355,34 @@ def main(
     overfit_lr: float = 5e-4,
     train_scenes: str = "",
     grid: int = 192,
-    steps: int = 2000,
+    steps: int = 8000,
     lr: float = 1.6e-4,
-    max_minutes: float = 25.0,
-    num_eval_pairs: int = 12,
-    video_pair: int = 0,
+    warmup: int = 300,
+    max_minutes: float = 50.0,
+    checkpoint_every: int = 2000,
+    val_every: int = 500,
+    seed: int = 0,
+    throughput_steps: int = 40,
+    checkpoints: str = "final",
 ):
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
+    if task == "stage2-checks":
+        print(stage2_checks.remote(run_name, train_scenes, grid, throughput_steps))
     if task == "stage2-train":
         print(
-            stage2_train.remote(run_name, train_scenes, eval_scenes, grid, steps, lr, max_minutes)
+            stage2_train.remote(
+                run_name,
+                train_scenes,
+                grid,
+                steps,
+                lr,
+                warmup,
+                max_minutes,
+                checkpoint_every,
+                val_every,
+                seed,
+            )
         )
     if task == "stage2-eval":
-        print(stage2_eval.remote(run_name, eval_scenes, grid, num_eval_pairs, video_pair))
+        print(stage2_eval.remote(run_name, checkpoints))

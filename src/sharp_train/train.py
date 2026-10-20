@@ -47,6 +47,7 @@ def train(
     snapshot_every=None,
     snapshot_batch=None,
     max_seconds=None,
+    callback=None,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +58,7 @@ def train(
     history = []
     started = time.time()
     iterator = iter(batches)
+    window, window_steps = {}, 0
     for step in range(steps):
         try:
             batch = next(iterator)
@@ -71,20 +73,29 @@ def train(
         terms["total"].backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
         optimizer.step()
-        if step % log_every == 0 or step == steps - 1:
+        for key, value in terms.items():
+            window[key] = window.get(key, 0.0) + value.detach()
+        window_steps += 1
+        out_of_time = max_seconds is not None and time.time() - started > max_seconds
+        if step % log_every == 0 or step == steps - 1 or out_of_time:
             entry = {
                 "step": step,
                 "lr": optimizer.param_groups[0]["lr"],
                 "grad_norm": float(grad_norm),
+                "window": window_steps,
             }
-            entry.update(summarize(terms))
+            entry.update({key: float(value) / window_steps for key, value in window.items()})
             entry["seconds"] = time.time() - started
             history.append(entry)
+            window, window_steps = {}, 0
             print(json.dumps(entry), flush=True)
+            (out_dir / "history.json").write_text(json.dumps(history, indent=1))
         if snapshot_every and snapshot_batch is not None and (step + 1) % snapshot_every == 0:
             snapshot(predictor, snapshot_batch, out_dir / f"snapshot_{step + 1:06d}.png", mask_key)
             predictor.train()
-        if max_seconds is not None and time.time() - started > max_seconds:
+        if callback is not None:
+            callback(step, out_of_time or step == steps - 1)
+        if out_of_time:
             print(f"stopping at step {step}: time budget reached", flush=True)
             break
     (out_dir / "history.json").write_text(json.dumps(history, indent=1))

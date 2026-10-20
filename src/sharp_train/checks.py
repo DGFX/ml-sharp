@@ -1,11 +1,13 @@
 import json
+import math
 import re
+import time
 from pathlib import Path
 
 import torch
 from sharp.utils.gaussians import compose_covariance_matrices, unproject_gaussians
 
-from sharp_train import losses, model, render, train, viz
+from sharp_train import geometry, losses, model, render, train, viz
 
 ATTRIBUTE_CHANNELS = {
     "mean_xy": slice(0, 2),
@@ -111,10 +113,11 @@ def gradient_check(predictor, batch, sharp_root):
     terms, _, _ = train.forward_pair(predictor, batch, delta_hook=hook)
     terms["total"].backward()
     ours = attribute_grad_norms(captured)
+    core = predictor.predictor if isinstance(predictor, model.GridPredictor) else predictor
     groups = {
-        "feature_model": predictor.feature_model,
-        "prediction_head": predictor.prediction_head,
-        "depth_alignment": predictor.depth_alignment,
+        "feature_model": core.feature_model,
+        "prediction_head": core.prediction_head,
+        "depth_alignment": core.depth_alignment,
     }
     group_norms = {}
     for name, module in groups.items():
@@ -130,11 +133,13 @@ def gradient_check(predictor, batch, sharp_root):
             "finite": all(bool(torch.isfinite(g).all()) for g in with_grad),
         }
     monodepth_trainable = sum(
-        p.numel() for p in predictor.monodepth_model.parameters() if p.requires_grad
+        p.numel() for p in core.monodepth_model.parameters() if p.requires_grad
     )
     predictor.zero_grad(set_to_none=True)
-    apple = apple_unprojection_forward(predictor, batch)
-    predictor.zero_grad(set_to_none=True)
+    apple = None
+    if core is predictor:
+        apple = apple_unprojection_forward(predictor, batch)
+        predictor.zero_grad(set_to_none=True)
     result = {
         "grad_enabled": torch.is_grad_enabled(),
         "static_scan": scan_inference_only_code(sharp_root),
@@ -255,4 +260,148 @@ def overfit_check(predictor, dataset, index, out_dir, device, steps, lr):
         "history": history,
         "criteria": criteria,
         "passed": all(criteria.values()),
+    }
+
+
+@torch.no_grad()
+def grid_equivalence_check(predictor, batch):
+    predictor.eval()
+    _, _, _, width = batch["image_src"].shape
+    resized = torch.nn.functional.interpolate(
+        batch["image_src"],
+        size=(model.INTERNAL_RESOLUTION,) * 2,
+        mode="bilinear",
+        align_corners=True,
+    )
+    depth = torch.nn.functional.interpolate(
+        model.fill_invalid_depth(batch["depth_src"]),
+        size=(model.INTERNAL_RESOLUTION,) * 2,
+        mode="nearest",
+    )
+    disparity_factor = batch["focal_px"] / width
+    apple = predictor(resized, disparity_factor, depth)
+    wrapped = model.GridPredictor(predictor, model.FULL_GRID)(resized, disparity_factor, depth)
+    differences = {
+        "mean_vectors": float((apple.mean_vectors - wrapped.mean_vectors).abs().max()),
+        "singular_values": float((apple.singular_values - wrapped.singular_values).abs().max()),
+        "colors": float((apple.colors - wrapped.colors).abs().max()),
+        "opacities": float((apple.opacities - wrapped.opacities).abs().max()),
+    }
+    return {
+        "gaussians": int(apple.mean_vectors.shape[1]),
+        "max_abs_difference": differences,
+        "passed": all(value == 0.0 for value in differences.values()),
+    }
+
+
+@torch.no_grad()
+def grid_forward_check(predictor, batch, grid):
+    grid_predictor = model.GridPredictor(predictor, grid).eval()
+    _, _, height, width = batch["image_src"].shape
+    gaussians = model.predict(
+        grid_predictor, batch["image_src"], batch["focal_px"], batch["depth_src"]
+    )
+    rendering_src, rendering_tgt = render.render_pair(gaussians, batch, width, height)
+    terms = losses.pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key="mask_visible_tgt")
+    result = {
+        "grid": grid,
+        "input_resolution": grid_predictor.input_resolution,
+        "gaussians": int(gaussians.means.shape[1]),
+        "apple_decoder_terms": train.summarize(terms),
+        "alpha_src_mean": float(rendering_src.alpha.mean()),
+    }
+    result["passed"] = bool(
+        result["gaussians"] == 2 * grid * grid
+        and result["apple_decoder_terms"]["color_src"] < 0.1
+        and result["alpha_src_mean"] > 0.9
+    )
+    return result
+
+
+def visibility_check(dataset, indices):
+    rows = []
+    for index in indices:
+        sample = dataset[index]
+        visible = sample["mask_visible_tgt"][None]
+        frustum = sample["mask_frustum_tgt"][None]
+        src_from_tgt = torch.linalg.inv(sample["tgt_from_src"])[None]
+        warped = geometry.warp_src_to_tgt(
+            sample["image_src"][None],
+            sample["depth_tgt"][None],
+            sample["intrinsics"][None],
+            src_from_tgt,
+        )
+        error = (warped - sample["image_tgt"][None]).abs().mean(dim=1, keepdim=True)
+        strict_frustum = geometry.frustum_mask(
+            sample["depth_tgt"][None], sample["intrinsics"][None], src_from_tgt, margin=1.0
+        )
+        occluded = strict_frustum * (1 - visible)
+        rows.append(
+            {
+                "pair": sample["name"],
+                "visible_fraction": float(visible.mean()),
+                "frustum_fraction": float(frustum.mean()),
+                "occluded_fraction": float(occluded.mean()),
+                "visible_outside_frustum": float((visible * (1 - frustum)).sum()),
+                "warp_error_visible": float(losses.masked_mean(error, visible)),
+                "warp_error_occluded": float(losses.masked_mean(error, occluded)),
+            }
+        )
+    with_occlusion = [row for row in rows if row["occluded_fraction"] > 0.01]
+    criteria = {
+        "visible is inside the frustum": all(row["visible_outside_frustum"] == 0 for row in rows),
+        "visible is a strict subset on some pairs": len(with_occlusion) > 0,
+        "every pair: warp error visible < occluded": all(
+            row["warp_error_visible"] < row["warp_error_occluded"] for row in with_occlusion
+        ),
+        "mean warp error visible < 0.5 x occluded": mean_of(rows, "warp_error_visible")
+        < 0.5 * mean_of(with_occlusion, "warp_error_occluded"),
+        "every pair: warp error visible < 0.1": all(
+            row["warp_error_visible"] < 0.1 for row in rows
+        ),
+    }
+    return {
+        "pairs": rows,
+        "mean": {key: mean_of(rows, key) for key in rows[0] if key != "pair"},
+        "criteria": criteria,
+        "passed": all(criteria.values()),
+    }
+
+
+def mean_of(rows, key):
+    return sum(row[key] for row in rows) / max(len(rows), 1)
+
+
+def throughput_check(predictor, loader, steps, out_dir):
+    torch.cuda.reset_peak_memory_stats()
+    started = None
+    timings = []
+
+    def callback(step, last):
+        nonlocal started
+        torch.cuda.synchronize()
+        now = time.time()
+        if started is not None:
+            timings.append(now - started)
+        started = now
+
+    history = train.train(
+        predictor,
+        loader,
+        steps,
+        out_dir,
+        lr=1e-4,
+        warmup=5,
+        mask_key="mask_visible_tgt",
+        log_every=5,
+        callback=callback,
+    )
+    steady = timings[len(timings) // 2 :]
+    return {
+        "steps": steps,
+        "seconds_per_step": sum(steady) / len(steady),
+        "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
+        "first_total": history[0]["total"],
+        "last_total": history[-1]["total"],
+        "finite": all(math.isfinite(entry["total"]) for entry in history),
     }

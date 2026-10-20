@@ -4,9 +4,11 @@ import torch
 import torch.nn.functional as F
 from sharp.models import PredictorParams, create_predictor
 from sharp.utils.gaussians import Gaussians3D, compose_covariance_matrices
+from torch import nn
 
 APPLE_CHECKPOINT_URL = "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
 INTERNAL_RESOLUTION = 1536
+FULL_GRID = 768
 
 
 @dataclasses.dataclass
@@ -25,6 +27,50 @@ def build_predictor(checkpoint=None, grad_checkpointing=False):
         state_dict = torch.load(checkpoint, weights_only=True, map_location="cpu")
         predictor.load_state_dict(state_dict)
     return predictor
+
+
+class GridPredictor(nn.Module):
+    def __init__(self, predictor, grid):
+        super().__init__()
+        if grid > FULL_GRID or FULL_GRID % grid:
+            raise ValueError(f"grid {grid} must divide {FULL_GRID}")
+        self.predictor = predictor
+        self.grid = grid
+        self.factor = FULL_GRID // grid
+        self.input_resolution = INTERNAL_RESOLUTION // self.factor
+
+    @property
+    def prediction_head(self):
+        return self.predictor.prediction_head
+
+    def downsample(self, tensor):
+        return tensor if self.factor == 1 else F.avg_pool2d(tensor, self.factor)
+
+    def forward(self, image, disparity_factor, depth=None):
+        predictor = self.predictor
+        monodepth_output = predictor.monodepth_model(image)
+        disparity = self.downsample(monodepth_output.disparity)
+        monodepth = disparity_factor[:, None, None, None] / disparity.clamp(min=1e-4, max=1e4)
+        monodepth, _ = predictor.depth_alignment(
+            monodepth, depth, self.downsample(monodepth_output.decoder_features)
+        )
+        init_output = predictor.init_model(self.downsample(image), monodepth)
+        image_features = predictor.feature_model(
+            init_output.feature_input,
+            encodings=[self.downsample(feature) for feature in monodepth_output.output_features],
+        )
+        delta_values = predictor.prediction_head(image_features)
+        return predictor.gaussian_composer(
+            delta=delta_values,
+            base_values=init_output.gaussian_base_values,
+            global_scale=init_output.global_scale,
+        )
+
+
+def input_resolution(predictor):
+    if isinstance(predictor, GridPredictor):
+        return predictor.input_resolution
+    return INTERNAL_RESOLUTION
 
 
 def reset_gaussian_decoder(predictor):
@@ -88,7 +134,7 @@ def predict(predictor, image, focal_px, depth=None, delta_hook=None):
     if depth is not None:
         aligned_depth = F.interpolate(
             fill_invalid_depth(depth),
-            size=(INTERNAL_RESOLUTION, INTERNAL_RESOLUTION),
+            size=(input_resolution(predictor),) * 2,
             mode="nearest",
         )
     handle = None

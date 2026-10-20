@@ -8,12 +8,22 @@ from PIL import Image
 from sharp_train import geometry
 
 
+def pair_name(pair):
+    return f"{pair['scene']}_{pair['src']}_{pair['tgt']}"
+
+
 class HypersimPairs(torch.utils.data.Dataset):
-    def __init__(self, root, scenes=None, pairs=None):
+    def __init__(self, root, scenes=None, pairs=None, names=None):
         self.root = Path(root)
         all_pairs = json.loads((self.root / "pairs.json").read_text())
         if scenes is not None:
             all_pairs = [pair for pair in all_pairs if pair["scene"] in scenes]
+        if names is not None:
+            by_name = {pair_name(pair): pair for pair in all_pairs}
+            missing = [name for name in names if name not in by_name]
+            if missing:
+                raise KeyError(f"pairs not in {self.root / 'pairs.json'}: {missing}")
+            all_pairs = [by_name[name] for name in names]
         self.pairs = all_pairs if pairs is None else [all_pairs[index] for index in pairs]
         self.cameras = {}
 
@@ -54,7 +64,7 @@ class HypersimPairs(torch.utils.data.Dataset):
             depth_tgt[None], depth_src[None], intrinsics, torch.linalg.inv(tgt_from_src)[None]
         )[0]
         return {
-            "name": f"{pair['scene']}_{pair['src']}_{pair['tgt']}",
+            "name": pair_name(pair),
             "image_src": image_src,
             "depth_src": depth_src,
             "image_tgt": image_tgt,
