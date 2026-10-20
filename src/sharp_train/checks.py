@@ -263,6 +263,28 @@ def overfit_check(predictor, dataset, index, out_dir, device, steps, lr):
     }
 
 
+def reset_decoder_check(predictor, batch):
+    head = predictor.prediction_head
+    zero_head = all(float(parameter.abs().max()) == 0.0 for parameter in head.parameters())
+    predictor.train()
+    predictor.zero_grad(set_to_none=True)
+    terms, _, _ = train.forward_pair(predictor, batch, mask_key="mask_visible_tgt")
+    terms["total"].backward()
+    head_grad = float(
+        torch.sqrt(
+            sum((p.grad.float() ** 2).sum() for p in head.parameters() if p.grad is not None)
+        )
+    )
+    predictor.zero_grad(set_to_none=True)
+    result = {
+        "head_starts_at_zero": zero_head,
+        "head_grad_norm": head_grad,
+        "terms_at_zero_delta": train.summarize(terms),
+    }
+    result["passed"] = bool(zero_head and head_grad > 0 and math.isfinite(head_grad))
+    return result
+
+
 @torch.no_grad()
 def grid_equivalence_check(predictor, batch):
     predictor.eval()

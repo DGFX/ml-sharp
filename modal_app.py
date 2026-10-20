@@ -188,12 +188,16 @@ def stage2_checks(run_name: str, train_scenes: str, grid: int, throughput_steps:
     report["grid_768_equals_apple"] = checks.grid_equivalence_check(apple, batch)
     report["grid_forward"] = checks.grid_forward_check(apple, batch, grid)
     print(json.dumps({key: report[key] for key in ("grid_768_equals_apple", "grid_forward")}))
+    report["gradient_check"] = checks.gradient_check(
+        model.GridPredictor(apple, grid), batch, "/root/repo/src/sharp"
+    )
+    report["gradient_check"].pop("static_scan")
+    print(json.dumps({"gradient_check": report["gradient_check"]}), flush=True)
     del apple
     torch.manual_seed(0)
     predictor = stage2.build_grid_predictor(checkpoint, grid).to(device)
-    report["gradient_check"] = checks.gradient_check(predictor, batch, "/root/repo/src/sharp")
-    report["gradient_check"].pop("static_scan")
-    print(json.dumps({"gradient_check": report["gradient_check"]}), flush=True)
+    report["reset_decoder"] = checks.reset_decoder_check(predictor, batch)
+    print(json.dumps({"reset_decoder": report["reset_decoder"]}), flush=True)
     _, loader = train_loader(scenes, 0)
     report["throughput"] = checks.throughput_check(
         predictor, loader, throughput_steps, out_dir / "throughput"
@@ -204,6 +208,7 @@ def stage2_checks(run_name: str, train_scenes: str, grid: int, throughput_steps:
         and report["grid_768_equals_apple"]["passed"]
         and report["grid_forward"]["passed"]
         and report["gradient_check"]["passed"]
+        and report["reset_decoder"]["passed"]
         and report["throughput"]["finite"]
     )
     write_json(out_dir / "stage2_checks.json", report)
