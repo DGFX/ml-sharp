@@ -15,9 +15,13 @@ def color_l1(rendered, target, mask):
 
 
 def disparity_l1(rendered_depth, target_depth, mask):
-    target = torch.nan_to_num(target_depth, nan=1.0).clamp(min=1e-3)
-    rendered = rendered_depth.clamp(min=1e-3)
-    return masked_mean((1.0 / rendered - 1.0 / target).abs(), mask)
+    target = 1.0 / torch.nan_to_num(target_depth, nan=1.0).clamp(min=1e-3)
+    rendered = torch.where(
+        rendered_depth > 1e-3,
+        1.0 / rendered_depth.clamp(min=1e-3),
+        torch.zeros_like(rendered_depth),
+    )
+    return masked_mean((rendered - target).abs(), mask)
 
 
 def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_weight=0.2):
