@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+PAIR_WEIGHTS = {"color_src": 1.0, "color_tgt": 1.0, "depth_src": 0.2, "depth_tgt": 0.2}
 STAGE3_WEIGHTS = {
     "alpha": 1.0,
     "percep": 3.0,
@@ -47,7 +48,7 @@ def disparity_l1(rendered_depth, target_depth, mask):
     return masked_mean((rendered - target).abs(), mask)
 
 
-def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_weight=0.2):
+def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None):
     valid_src = valid_depth_mask(batch["depth_src"])
     valid_tgt = valid_depth_mask(batch["depth_tgt"])
     color_mask_src = torch.ones_like(valid_src)
@@ -61,11 +62,7 @@ def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None, depth_we
         "depth_src": disparity_l1(rendering_src.depth, batch["depth_src"], valid_src),
         "depth_tgt": disparity_l1(rendering_tgt.depth, batch["depth_tgt"], valid_tgt),
     }
-    terms["total"] = (
-        terms["color_src"]
-        + terms["color_tgt"]
-        + depth_weight * (terms["depth_src"] + terms["depth_tgt"])
-    )
+    terms["total"] = sum(PAIR_WEIGHTS[key] * terms[key] for key in PAIR_WEIGHTS)
     return terms
 
 
@@ -243,3 +240,8 @@ def add_stage3(terms, extra):
         STAGE3_WEIGHTS[key] * extra[key] for key in STAGE3_WEIGHTS
     )
     return terms
+
+
+def weighted_terms(terms):
+    weights = {**PAIR_WEIGHTS, **STAGE3_WEIGHTS}
+    return {key: weights[key] * value for key, value in terms.items() if key in weights}

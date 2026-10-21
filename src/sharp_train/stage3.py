@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from sharp_train import losses, model, multigrid, stage2
+from sharp_train import losses, model, multigrid, stage2, train
 from sharp_train.data import HypersimPairs
 
 CHECK_GRID = 192
@@ -115,6 +115,38 @@ def depth_path_check(predictor, batch):
     }
 
 
+def spike_attribution_check(predictor, batch):
+    predictor.train()
+    predictor.zero_grad(set_to_none=True)
+    gaussians = model.predict(
+        predictor, batch["image_src"], batch["focal_px"], batch["depth_src"], depth_correction=True
+    )
+    terms = losses.regularizer_terms(batch, gaussians, predictor.training_state)
+    weighted = losses.weighted_terms(terms)
+    terms["total"] = sum(weighted.values())
+    parameters = model.trainable_parameters(predictor)
+    norms = train.term_grad_norms(terms, parameters)
+    terms["total"].backward()
+    optimizer_norm = float(torch.nn.utils.clip_grad_norm_(parameters, math.inf))
+    predictor.zero_grad(set_to_none=True)
+    term_norms = {key: value for key, value in norms.items() if key != "total"}
+    live = {key for key, value in weighted.items() if value.requires_grad}
+    return {
+        "term_grad_norms": norms,
+        "optimizer_grad_norm": optimizer_norm,
+        "criteria": {
+            "spike total norm equals the optimizer gradient norm": abs(
+                norms["total"] - optimizer_norm
+            )
+            <= 1e-4 * optimizer_norm,
+            "every live weighted term gets a finite norm": set(term_norms) == live
+            and all(math.isfinite(value) for value in norms.values()),
+            "term norms bound the total norm": norms["total"]
+            <= sum(term_norms.values()) * (1 + 1e-5),
+        },
+    }
+
+
 def perceptual_check(batch):
     perceptual = losses.PerceptualLoss()
     rendered, target = batch["image_src"], batch["image_tgt"]
@@ -146,14 +178,21 @@ def cpu_checks(data_root, apple_path):
     torch.manual_seed(0)
     predictor = stage2.build_grid_predictor(str(apple_path), CHECK_GRID, reset_decoder=False)
     depth = depth_path_check(predictor, batch)
+    spikes = spike_attribution_check(predictor, batch)
     del predictor
     perceptual = perceptual_check(batch)
-    criteria = {**split["criteria"], **depth["criteria"], **perceptual["criteria"]}
+    criteria = {
+        **split["criteria"],
+        **depth["criteria"],
+        **spikes["criteria"],
+        **perceptual["criteria"],
+    }
     return {
         "pair": batch["name"][0],
         "grid": CHECK_GRID,
         "split": split,
         "depth_path": depth,
+        "spike_attribution": spikes,
         "perceptual": perceptual,
         "criteria": criteria,
         "passed": all(criteria.values()),
