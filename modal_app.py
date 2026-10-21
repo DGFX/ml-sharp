@@ -15,6 +15,12 @@ BASE_GRID = 192
 BASE_MAX_MINUTES = 50.0
 STAGE3_TIMEOUT_MINUTES = {"check": 45, "train": 120, "eval": 60}
 STAGE2_TIMEOUT_MINUTES = {"checks": 25, "train": 80, "eval": 40}
+FIXED_TIMEOUT_MINUTES = {"stage1": 45, "predict": 15}
+TRAIN_TASKS = ("stage2-train", "stage3-train")
+GPU_USD_PER_HOUR = {"A100-40GB": 2.23, "H100": 4.20}
+MODAL_MAX_TIMEOUT_SECONDS = 24 * 60 * 60
+STARTUP_MINUTES = 10
+TIMEOUT_MARGIN_MINUTES = 15
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.13")
@@ -102,9 +108,8 @@ def resolved_timeout_seconds(timeout_minutes, base_minutes, grid):
 
 
 def resolved_gpu(gpu, grid):
-    chosen = gpu or os.environ.get("STAGE3_GPU")
-    if chosen:
-        return chosen
+    if gpu:
+        return gpu
     if grid >= 768:
         return H100
     return GPU
@@ -115,6 +120,51 @@ def run_options(base_minutes, grid, gpu, timeout_minutes):
         "gpu": resolved_gpu(gpu, grid),
         "timeout": resolved_timeout_seconds(timeout_minutes, base_minutes, grid),
     }
+
+
+def task_options(task, mode, grid, gpu, timeout_minutes):
+    if task in FIXED_TIMEOUT_MINUTES:
+        return {"gpu": GPU, "timeout": FIXED_TIMEOUT_MINUTES[task] * 60}
+    if task == "stage3" and mode in STAGE3_TIMEOUT_MINUTES:
+        gpu = gpu or os.environ.get("STAGE3_GPU", "")
+        return run_options(STAGE3_TIMEOUT_MINUTES[mode], grid, gpu, timeout_minutes)
+    kind = task.removeprefix("stage2-")
+    if kind != task and kind in STAGE2_TIMEOUT_MINUTES:
+        return run_options(STAGE2_TIMEOUT_MINUTES[kind], grid, gpu, timeout_minutes)
+    raise SystemExit(f"unknown --task {task} --mode {mode}")
+
+
+def preflight(task, gpu, timeout_seconds, max_minutes, max_usd, seconds_per_step, steps):
+    if gpu not in GPU_USD_PER_HOUR:
+        raise SystemExit(f"refused: no price for GPU {gpu}")
+    price = GPU_USD_PER_HOUR[gpu]
+    timeout_minutes = timeout_seconds / 60
+    report = {
+        "task": task,
+        "gpu": gpu,
+        "usd_per_hour": price,
+        "timeout_minutes": timeout_minutes,
+        "worst_case_usd": round(price * timeout_minutes / 60, 2),
+        "max_usd": max_usd,
+    }
+    training = task in TRAIN_TASKS
+    if training:
+        report["budget_minutes"] = max_minutes
+    if training and seconds_per_step:
+        train_minutes = min(steps * seconds_per_step / 60, max_minutes)
+        report["expected_usd"] = round(price * (train_minutes + STARTUP_MINUTES) / 60, 2)
+    reasons = []
+    if not max_usd:
+        reasons.append("pass --max-usd")
+    elif report["worst_case_usd"] > max_usd:
+        reasons.append("worst_case_usd exceeds --max-usd")
+    if timeout_seconds > MODAL_MAX_TIMEOUT_SECONDS:
+        reasons.append("timeout exceeds Modal's 24 h limit")
+    if training and max_minutes + TIMEOUT_MARGIN_MINUTES > timeout_minutes:
+        reasons.append(f"max_minutes + {TIMEOUT_MARGIN_MINUTES} exceeds the timeout")
+    if reasons:
+        raise SystemExit(f"refused ({'; '.join(reasons)}): {json.dumps(report)}")
+    return report
 
 
 @app.function(gpu=GPU, timeout=45 * 60, volumes={VOLUME_ROOT: volume})
@@ -731,8 +781,16 @@ def main(
     checkpoint: str = "",
     out: str = "",
     predict_grid: int = 0,
+    max_usd: float = 0,
+    seconds_per_step: float = 0,
 ):
     minutes = resolved_max_minutes(max_minutes, grid)
+    options = task_options(task, mode, grid, gpu, timeout_minutes)
+    name = f"stage3-{mode}" if task == "stage3" else task
+    report = preflight(
+        name, options["gpu"], options["timeout"], minutes, max_usd, seconds_per_step, steps
+    )
+    print(json.dumps(report))
     if task == "predict":
         if not image or not checkpoint:
             raise ValueError("--task predict needs --image and --checkpoint")
@@ -747,9 +805,7 @@ def main(
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
     if task == "stage2-checks":
         print(
-            stage2_checks.with_options(
-                **run_options(STAGE2_TIMEOUT_MINUTES["checks"], grid, gpu, timeout_minutes)
-            ).remote(
+            stage2_checks.with_options(**options).remote(
                 run_name,
                 train_scenes,
                 grid,
@@ -760,9 +816,7 @@ def main(
         )
     if task == "stage2-train":
         print(
-            stage2_train.with_options(
-                **run_options(STAGE2_TIMEOUT_MINUTES["train"], grid, gpu, timeout_minutes)
-            ).remote(
+            stage2_train.with_options(**options).remote(
                 run_name,
                 train_scenes,
                 grid,
@@ -779,17 +833,11 @@ def main(
             )
         )
     if task == "stage2-eval":
-        print(
-            stage2_eval.with_options(
-                **run_options(STAGE2_TIMEOUT_MINUTES["eval"], grid, gpu, timeout_minutes)
-            ).remote(run_name, checkpoints)
-        )
+        print(stage2_eval.with_options(**options).remote(run_name, checkpoints))
     if task == "stage3":
         if mode == "check":
             print(
-                stage3_check.with_options(
-                    **run_options(STAGE3_TIMEOUT_MINUTES["check"], grid, gpu, timeout_minutes)
-                ).remote(
+                stage3_check.with_options(**options).remote(
                     run_name,
                     train_scenes,
                     grid,
@@ -802,9 +850,7 @@ def main(
             )
         elif mode == "train":
             print(
-                stage3_train.with_options(
-                    **run_options(STAGE3_TIMEOUT_MINUTES["train"], grid, gpu, timeout_minutes)
-                ).remote(
+                stage3_train.with_options(**options).remote(
                     run_name,
                     train_scenes,
                     grid,
@@ -825,10 +871,4 @@ def main(
                 )
             )
         elif mode == "eval":
-            print(
-                stage3_eval.with_options(
-                    **run_options(STAGE3_TIMEOUT_MINUTES["eval"], grid, gpu, timeout_minutes)
-                ).remote(run_name, checkpoints)
-            )
-        else:
-            raise ValueError(f"unknown stage3 mode {mode}")
+            print(stage3_eval.with_options(**options).remote(run_name, checkpoints))

@@ -19,7 +19,7 @@ Run from a machine with Modal auth (Dominik's Mac or ai-vps, `~/.modal.toml`). N
 2. Spend before: `modal billing report --start $(date +%F) --json`.
 3. Stage 1:
    ```
-   modal run modal_app.py --task stage1 --run-name stage1-$(git rev-parse --short HEAD) --eval-scenes ai_005_001,ai_007_001
+   modal run modal_app.py --task stage1 --run-name stage1-$(git rev-parse --short HEAD) --eval-scenes ai_005_001,ai_007_001 --max-usd 1.67
    ```
    The first run builds the image (gsplat compiles its CUDA kernels, CPU only, about 10 to 20 minutes, no GPU billed). Ready means the log prints the `gradient_check` JSON line. The GPU part takes about 10 minutes on an A100-40GB, timeout 45 minutes. The Apple checkpoint is cached on the volume at `/vol/checkpoints`.
 

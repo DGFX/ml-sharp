@@ -448,7 +448,7 @@ Nobody has measured grid 768. Estimate:
 First action at 768, before any run: measure it.
 
 ```
-modal run modal_app.py --task stage3 --mode check --grid 768 --run-name stage3-g768-check --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --timeout-minutes 30
+modal run modal_app.py --task stage3 --mode check --grid 768 --run-name stage3-g768-check --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --timeout-minutes 30 --max-usd 2.10
 ```
 
 `--timeout-minutes 30` caps the spend. If it fails on memory, repeat with `--grad-checkpointing 1`. The check prints `seconds_per_step` and `peak_memory_gb`. Replace the band above with that number.
@@ -464,11 +464,11 @@ Why: E2 `final.pt` pairs E2's decoder and alignment with Apple's head.4 (see the
 Same recipe as E2, 1000 steps, default train scenes (as E2). `<sha>` is any `main` commit at or after `98aed10`.
 
 ```
-modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 1000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 15 --timeout-minutes 25
+modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 1000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 15 --timeout-minutes 25 --max-usd 0.93
 ```
 
 ```
-modal run modal_app.py --task stage3 --mode eval --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --checkpoints final
+modal run modal_app.py --task stage3 --mode eval --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --checkpoints final --max-usd 8.92
 ```
 
 Measurement M1, the cost of the lost head. It needs no extra GPU. The loss, model, render and validation code are unchanged from `391a8ae` to `98aed10` (checked with `git diff`). So A0's step-0 validation (E2 weights with Apple's head) compares directly with E2's last validation (E2 with its own trained head, same 8 pairs from `ai_011_001`):
@@ -527,15 +527,15 @@ Replace `<sha>` with the commit of `modal_app.py` you run. `scenes_150.txt` and 
 Stage A (if A0 passed, replace the E2 `final.pt` path with E2h's and `reports/e2-final.json` with `reports/e2h-final.json`):
 
 ```
-modal run modal_app.py --task stage3 --mode check --grid 384 --run-name stage3-g384-<sha>-s150-check --train-scenes "$(paste -sd, scenes_150.txt)" --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1
+modal run modal_app.py --task stage3 --mode check --grid 384 --run-name stage3-g384-<sha>-s150-check --train-scenes "$(paste -sd, scenes_150.txt)" --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --max-usd 6.69
 ```
 
 ```
-modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-s150-lr4e5-dc1 --train-scenes "$(paste -sd, scenes_150.txt)" --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 9000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 100 --timeout-minutes 130
+modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-s150-lr4e5-dc1 --train-scenes "$(paste -sd, scenes_150.txt)" --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 9000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 100 --timeout-minutes 130 --max-usd 4.83
 ```
 
 ```
-modal run modal_app.py --task stage3 --mode eval --grid 384 --run-name stage3-g384-<sha>-s150-lr4e5-dc1 --checkpoints final,step_003000,step_006000
+modal run modal_app.py --task stage3 --mode eval --grid 384 --run-name stage3-g384-<sha>-s150-lr4e5-dc1 --checkpoints final,step_003000,step_006000 --max-usd 8.92
 ```
 
 Then fetch the report and compare with the base (the base report path assumes E2's eval already exists):
@@ -550,11 +550,11 @@ Stage B: the same, with `scenes_300.txt`, `--run-name stage3-g384-<sha>-s300-lr4
 Stage C:
 
 ```
-modal run modal_app.py --task stage3 --mode train --grid 768 --gpu H100 --run-name stage3-g768-<sha>-s300-lr4e5-dc1 --train-scenes "$(paste -sd, scenes_300.txt)" --init-checkpoint runs/stage3-g384-<sha>-s300-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 6000 --lr 4e-5 --warmup 200 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 240 --timeout-minutes 300
+modal run modal_app.py --task stage3 --mode train --grid 768 --gpu H100 --run-name stage3-g768-<sha>-s300-lr4e5-dc1 --train-scenes "$(paste -sd, scenes_300.txt)" --init-checkpoint runs/stage3-g384-<sha>-s300-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 6000 --lr 4e-5 --warmup 200 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 240 --timeout-minutes 300 --max-usd 21.00
 ```
 
 ```
-modal run modal_app.py --task stage3 --mode eval --grid 768 --run-name stage3-g768-<sha>-s300-lr4e5-dc1 --checkpoints final
+modal run modal_app.py --task stage3 --mode eval --grid 768 --run-name stage3-g768-<sha>-s300-lr4e5-dc1 --checkpoints final --max-usd 67.20
 ```
 
 Add `--grad-checkpointing 1` if the check ran out of memory.

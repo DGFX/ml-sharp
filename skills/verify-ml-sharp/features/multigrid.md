@@ -21,9 +21,9 @@ PYTHONPATH=src python -m sharp_train.multigrid
 
 ```
 PYTHONPATH=src python -m sharp_train.multigrid
-modal run modal_app.py --task stage3 --mode check --run-name stage3-grid384-check-<sha> --grid 384 --init-checkpoint runs/stage3-b29749e/checkpoints/final.pt --grad-checkpointing 1
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1
+modal run modal_app.py --task stage3 --mode check --run-name stage3-grid384-check-<sha> --grid 384 --init-checkpoint runs/stage3-b29749e/checkpoints/final.pt --grad-checkpointing 1 --max-usd 6.69
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1 --max-usd 17.84
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --max-usd 134.4
 ```
 
 Recipe defaults stay run 2: `--steps 8000`, `--lr 1.6e-4`, `--warmup 300`, `--depth-correction 1`, depth alignment held, paper loss weights, novel-view color inside the visibility mask. Omit `--max-minutes` and `--timeout-minutes` to take the grid scale (x4 at 384, x16 at 768). Omit `--gpu` to take `A100-40GB` at 384 and `H100` at 768.
