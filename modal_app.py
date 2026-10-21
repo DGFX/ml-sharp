@@ -21,6 +21,8 @@ GPU_USD_PER_HOUR = {"A100-40GB": 2.23, "H100": 4.20}
 MODAL_MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 STARTUP_MINUTES = 10
 TIMEOUT_MARGIN_MINUTES = 15
+STAGE2_LR = 1.6e-4
+STAGE2_WARMUP = 300
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.13")
@@ -133,6 +135,16 @@ def task_options(task, mode, grid, gpu, timeout_minutes):
     if kind != task and kind in STAGE2_TIMEOUT_MINUTES:
         return run_options(STAGE2_TIMEOUT_MINUTES[kind], grid, gpu, timeout_minutes)
     raise SystemExit(f"unknown --task {task} --mode {mode}")
+
+
+def resolved_schedule(task, mode, resume, lr, warmup):
+    if task == "stage3" and mode == "train" and not resume and not (lr and warmup):
+        raise SystemExit(
+            "refused: a new stage 3 train run needs explicit --lr and --warmup. "
+            "The finetune recipe in docs/training-spec.md is --lr 4e-5 --warmup 100. "
+            "--resume continues a run with its saved schedule."
+        )
+    return lr or STAGE2_LR, warmup or STAGE2_WARMUP
 
 
 def preflight(task, gpu, timeout_seconds, max_minutes, max_usd, seconds_per_step, steps):
@@ -326,6 +338,11 @@ def stage2_train(
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
+    existing = run.latest_checkpoint(out_dir / "checkpoints")
+    if existing is not None:
+        raise FileExistsError(
+            f"{existing} exists; stage 2 runs cannot resume, so use a new --run-name"
+        )
     checkpoint = ensure_checkpoint()
     _, val, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     train_set, loader = train_loader(scenes, seed)
@@ -562,10 +579,16 @@ def stage3_train(
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
+    if not resume:
+        existing = run.latest_checkpoint(out_dir / "checkpoints")
+        if existing is not None:
+            resume = str(existing)
+            print(json.dumps({"auto_resume": resume, "reason": "run has checkpoints"}), flush=True)
     apple_checkpoint = ensure_checkpoint()
     resumed = stage2.read_resume(volume_path(resume)) if resume else None
     if resumed is not None:
         saved = resumed["meta"]
+        run.check_resume(saved, resumed["training"]["next_step"], grid)
         grid, steps, lr, warmup, seed = (
             saved[key] for key in ("grid", "steps", "lr", "warmup", "seed")
         )
@@ -577,6 +600,8 @@ def stage3_train(
     first_step = resumed["training"]["next_step"] if resumed is not None else 0
     _, val, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     train_set, loader = train_loader(scenes, seed, first_step)
+    if resumed is not None:
+        run.check_resume_data(saved, train_set, val["pairs"], losses.STAGE3_WEIGHTS)
     validation = stage2.validation_batches(DATA_ROOT, val["pairs"])
     torch.manual_seed(seed)
     predictor, init_step, init_path = load_stage3_predictor(
@@ -605,6 +630,7 @@ def stage3_train(
             "input_resolution": predictor.input_resolution,
             "train_scenes": scenes,
             "train_pairs": len(train_set),
+            "train_pairs_sha256": run.pairs_sha256(train_set),
             "validation_scene": val["scene"],
             "validation_pairs": val["pairs"],
             "steps": steps,
@@ -696,8 +722,8 @@ def main(
     train_scenes: str = "",
     grid: int = 192,
     steps: int = 8000,
-    lr: float = 1.6e-4,
-    warmup: int = 300,
+    lr: float = 0,
+    warmup: int = 0,
     max_minutes: float = 0,
     checkpoint_every: int = 2000,
     val_every: int = 500,
@@ -721,6 +747,7 @@ def main(
     max_usd: float = 0,
     seconds_per_step: float = 0,
 ):
+    lr, warmup = resolved_schedule(task, mode, resume, lr, warmup)
     minutes = resolved_max_minutes(max_minutes, grid)
     options = task_options(task, mode, grid, gpu, timeout_minutes)
     name = f"stage3-{mode}" if task == "stage3" else task

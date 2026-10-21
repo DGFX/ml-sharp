@@ -1,6 +1,50 @@
+import hashlib
 import json
 
-from sharp_train import stage2, train, viz
+from sharp_train import data, stage2, train, viz
+
+STOP_KEYS = ("stopped_at_step", "stop_reason")
+
+
+def pairs_sha256(dataset):
+    names = "\n".join(data.pair_name(pair) for pair in dataset.pairs)
+    return hashlib.sha256(names.encode()).hexdigest()
+
+
+def latest_checkpoint(checkpoint_dir):
+    final = checkpoint_dir / "final.pt"
+    if final.exists():
+        return final
+    steps = sorted(checkpoint_dir.glob("step_*.pt"))
+    return steps[-1] if steps else None
+
+
+def check_resume(meta, next_step, grid):
+    if next_step >= meta["steps"]:
+        raise ValueError(f"run already finished at step {next_step}; use a new run name")
+    if meta["grid"] != grid:
+        raise ValueError(
+            f"checkpoint grid {meta['grid']} differs from --grid {grid}; "
+            f"pass --grid {meta['grid']} so the GPU and budget fit the run"
+        )
+
+
+def check_resume_data(meta, train_set, validation_pairs, weights):
+    changed = [
+        key
+        for key, now in (("weights", weights), ("validation_pairs", validation_pairs))
+        if meta[key] != now
+    ]
+    if "train_pairs_sha256" in meta:
+        if meta["train_pairs_sha256"] != pairs_sha256(train_set):
+            changed.append("train_pairs_sha256")
+    elif meta["train_pairs"] != len(train_set):
+        changed.append("train_pairs")
+    else:
+        warning = "checkpoint has no train_pairs_sha256; only the train pair count was verified"
+        print(json.dumps({"warning": warning, "train_pairs": len(train_set)}), flush=True)
+    if changed:
+        raise ValueError(f"resume does not match the saved run: {changed}; use a new run name")
 
 
 def killed_by_validation(val_history, kill_val_ratio, meta, out_dir, done):
@@ -52,6 +96,8 @@ def run_training(
         )
         return {"step": step, **totals}
 
+    for key in STOP_KEYS:
+        meta.pop(key, None)
     stage2.save_json(out_dir / "train_meta.json", meta)
     if resume is not None:
         val_history = resume["val_history"]
@@ -69,6 +115,9 @@ def run_training(
             if kill_val_ratio is not None:
                 killed = killed_by_validation(val_history, kill_val_ratio, meta, out_dir, done)
             stage2.save_json(out_dir / "val_history.json", val_history)
+        if last and done < steps and not killed:
+            meta.update(stopped_at_step=done, stop_reason="time_budget")
+            stage2.save_json(out_dir / "train_meta.json", meta)
         if done % checkpoint_every == 0 or last or killed:
             name = "final" if last or killed else f"step_{done:06d}"
             extra = {"meta": meta}
