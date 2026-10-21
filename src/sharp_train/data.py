@@ -75,3 +75,27 @@ class HypersimPairs(torch.utils.data.Dataset):
             "mask_frustum_tgt": frustum,
             "mask_visible_tgt": visibility,
         }
+
+
+class EpochShuffleSampler(torch.utils.data.Sampler):
+    def __init__(self, size, seed, start=0):
+        self.size = size
+        self.seed = seed
+        self.start = start
+
+    def __iter__(self):
+        epoch, offset = divmod(self.start, self.size)
+        while True:
+            generator = torch.Generator().manual_seed(self.seed + epoch)
+            yield from torch.randperm(self.size, generator=generator)[offset:].tolist()
+            epoch, offset = epoch + 1, 0
+
+
+def train_stream(dataset, seed, start=0, workers=0):
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        sampler=EpochShuffleSampler(len(dataset), seed, start),
+        num_workers=workers,
+        persistent_workers=workers > 0,
+    )

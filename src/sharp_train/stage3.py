@@ -1,14 +1,18 @@
 import argparse
+import itertools
 import json
 import math
+import tempfile
 from pathlib import Path
 
 import torch
 
 from sharp_train import losses, model, multigrid, stage2, train
-from sharp_train.data import HypersimPairs
+from sharp_train.data import EpochShuffleSampler, HypersimPairs, train_stream
 
 CHECK_GRID = 192
+RESUME_STEPS = 4
+RESUME_SPLIT = 2
 GAUSSIAN_FIELDS = ("means", "covariances", "colors", "opacities")
 
 
@@ -115,15 +119,24 @@ def depth_path_check(predictor, batch):
     }
 
 
+def regularizer_forward(predictor, batch, mask_key=None, stage3=None, depth_correction=True):
+    gaussians = model.predict(
+        predictor,
+        batch["image_src"],
+        batch["focal_px"],
+        batch["depth_src"],
+        depth_correction=depth_correction,
+    )
+    terms = losses.regularizer_terms(batch, gaussians, predictor.training_state)
+    terms["total"] = sum(losses.weighted_terms(terms).values())
+    return terms, None, None
+
+
 def spike_attribution_check(predictor, batch):
     predictor.train()
     predictor.zero_grad(set_to_none=True)
-    gaussians = model.predict(
-        predictor, batch["image_src"], batch["focal_px"], batch["depth_src"], depth_correction=True
-    )
-    terms = losses.regularizer_terms(batch, gaussians, predictor.training_state)
+    terms, _, _ = regularizer_forward(predictor, batch)
     weighted = losses.weighted_terms(terms)
-    terms["total"] = sum(weighted.values())
     parameters = model.trainable_parameters(predictor)
     norms = train.term_grad_norms(terms, parameters)
     terms["total"].backward()
@@ -170,6 +183,127 @@ def perceptual_check(batch):
     }
 
 
+def train_segment(apple_path, checkpoint, dataset, out_dir, start=0, resume=None, stop_after=None):
+    torch.manual_seed(0)
+    predictor, _ = stage2.load_checkpoint(str(apple_path), checkpoint)
+    captured = {}
+
+    def callback(step, last, state):
+        stopping = step + 1 == stop_after
+        if stopping:
+            stage2.save_checkpoint(
+                predictor, Path(out_dir) / "resume.pt", step + 1, {"training": state()}
+            )
+        if stopping or last:
+            captured.update(state())
+        return stopping
+
+    train.train(
+        predictor,
+        train_stream(dataset, 0, start),
+        RESUME_STEPS,
+        out_dir,
+        lr=1e-4,
+        warmup=2,
+        log_every=3,
+        callback=callback,
+        resume=resume,
+        forward=regularizer_forward,
+    )
+    trainable = {
+        name
+        for name, parameter in predictor.predictor.named_parameters()
+        if parameter.requires_grad
+    }
+    return stage2.trained_state(predictor), captured, trainable
+
+
+def max_difference(first, second):
+    return max(float((first[key].float() - second[key].float()).abs().max()) for key in first)
+
+
+def optimizer_difference(first, second):
+    return max(
+        max_difference(first["state"][index], second["state"][index]) for index in first["state"]
+    )
+
+
+def without_seconds(history):
+    return [{key: value for key, value in entry.items() if key != "seconds"} for entry in history]
+
+
+def resume_check(data_root, apple_path):
+    val = stage2.val_spec()
+    dataset = HypersimPairs(data_root, names=val["pairs"])
+    size = len(dataset)
+    stream = list(itertools.islice(EpochShuffleSampler(size, 0), 2 * size))
+    seeked = list(itertools.islice(EpochShuffleSampler(size, 0, size - 1), size + 1))
+    workdir = Path(tempfile.mkdtemp())
+    initial = workdir / "initial.pt"
+    torch.manual_seed(0)
+    source = stage2.build_grid_predictor(str(apple_path), CHECK_GRID, reset_decoder=False)
+    stage2.save_checkpoint(source, initial, 0)
+    del source
+    straight, straight_end, trainable = train_segment(
+        apple_path, initial, dataset, workdir / "straight"
+    )
+    _, stopped, _ = train_segment(
+        apple_path, initial, dataset, workdir / "stopped", stop_after=RESUME_SPLIT
+    )
+    saved = workdir / "stopped" / "resume.pt"
+    payload = stage2.read_resume(saved)
+    resumed, resumed_end, _ = train_segment(
+        apple_path,
+        saved,
+        dataset,
+        workdir / "resumed",
+        start=payload["training"]["next_step"],
+        resume=payload["training"],
+    )
+    restarted, _, _ = train_segment(
+        apple_path,
+        saved,
+        dataset,
+        workdir / "restarted",
+        start=RESUME_SPLIT,
+        stop_after=RESUME_STEPS - RESUME_SPLIT,
+    )
+    weight_gap = max_difference(straight, resumed)
+    optimizer_gap = optimizer_difference(straight_end["optimizer"], resumed_end["optimizer"])
+    restart_gap = max_difference(straight, restarted)
+    histories_match = without_seconds(straight_end["history"]) == without_seconds(
+        resumed_end["history"]
+    )
+    return {
+        "steps": RESUME_STEPS,
+        "split": RESUME_SPLIT,
+        "saved_next_step": payload["training"]["next_step"],
+        "saved_window": len(payload["training"]["window_norms"]),
+        "weight_max_difference": weight_gap,
+        "optimizer_max_difference": optimizer_gap,
+        "restart_without_state_weight_difference": restart_gap,
+        "learning_rates": [entry["lr"] for entry in resumed_end["history"]],
+        "criteria": {
+            "seeked sampler continues the stream across an epoch": seeked
+            == stream[size - 1 : 2 * size],
+            "checkpoint resumes at the next step mid log window": stopped["next_step"]
+            == payload["training"]["next_step"]
+            == RESUME_SPLIT
+            and len(payload["training"]["window_norms"]) == 1,
+            "checkpoint holds every trainable parameter": trainable <= set(payload["state_dict"]),
+            "resumed weights equal uninterrupted weights": weight_gap == 0.0,
+            "resumed Adam state equals uninterrupted Adam state": optimizer_gap == 0.0
+            and straight_end["optimizer"]["param_groups"][0]["lr"]
+            == resumed_end["optimizer"]["param_groups"][0]["lr"],
+            "resumed history and learning rates equal uninterrupted": histories_match,
+            "resumed RNG state equals uninterrupted": torch.equal(
+                straight_end["rng"]["cpu"], resumed_end["rng"]["cpu"]
+            ),
+            "restart without training state diverges": restart_gap > 0.0,
+        },
+    }
+
+
 def cpu_checks(data_root, apple_path):
     split = split_check(data_root)
     val = stage2.val_spec()
@@ -181,11 +315,13 @@ def cpu_checks(data_root, apple_path):
     spikes = spike_attribution_check(predictor, batch)
     del predictor
     perceptual = perceptual_check(batch)
+    resume = resume_check(data_root, apple_path)
     criteria = {
         **split["criteria"],
         **depth["criteria"],
         **spikes["criteria"],
         **perceptual["criteria"],
+        **resume["criteria"],
     }
     return {
         "pair": batch["name"][0],
@@ -194,6 +330,7 @@ def cpu_checks(data_root, apple_path):
         "depth_path": depth,
         "spike_attribution": spikes,
         "perceptual": perceptual,
+        "resume": resume,
         "criteria": criteria,
         "passed": all(criteria.values()),
     }

@@ -65,10 +65,8 @@ def term_grad_norms(terms, parameters):
     return norms
 
 
-def spike_report(predictor, batch, parameters, step, grad_norm, mask_key, stage3, depth_correction):
-    terms, _, _ = forward_pair(
-        predictor, batch, mask_key=mask_key, stage3=stage3, depth_correction=depth_correction
-    )
+def spike_report(predictor, batch, parameters, step, grad_norm, forward, options):
+    terms, _, _ = forward(predictor, batch, **options)
     return {
         "step": step,
         "pairs": list(batch["name"]),
@@ -80,6 +78,19 @@ def spike_report(predictor, batch, parameters, step, grad_norm, mask_key, stage3
 
 def val_regressed(val_history, ratio):
     return bool(ratio) and val_history[-1]["total"] > ratio * val_history[0]["total"]
+
+
+def rng_state():
+    state = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng(state):
+    torch.set_rng_state(state["cpu"])
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
 
 
 def train(
@@ -98,6 +109,8 @@ def train(
     stage3=None,
     depth_correction=True,
     grad_clip=losses.GRAD_CLIP_NORM,
+    resume=None,
+    forward=forward_pair,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,11 +119,34 @@ def train(
     parameters = model.trainable_parameters(predictor)
     optimizer = torch.optim.Adam(parameters, lr=lr)
     max_norm = grad_clip or math.inf
-    history = []
+    options = {"mask_key": mask_key, "stage3": stage3, "depth_correction": depth_correction}
+    history, spikes, window, window_norms, first, earlier_seconds = [], [], {}, [], 0, 0.0
+    if resume is not None:
+        optimizer.load_state_dict(resume["optimizer"])
+        history, spikes = resume["history"], resume["spikes"]
+        window = {key: value.to(device) for key, value in resume["window"].items()}
+        window_norms = list(resume["window_norms"].to(device).unbind())
+        first, earlier_seconds = resume["next_step"], resume["seconds"]
+        (out_dir / "history.json").write_text(json.dumps(history, indent=1))
+        (out_dir / "spikes.json").write_text(json.dumps(spikes, indent=1))
     started = time.time()
+
+    def checkpoint_state(next_step):
+        return {
+            "next_step": next_step,
+            "optimizer": optimizer.state_dict(),
+            "history": history,
+            "spikes": spikes,
+            "window": {key: value.cpu() for key, value in window.items()},
+            "window_norms": torch.stack(window_norms).cpu() if window_norms else torch.zeros(0),
+            "seconds": earlier_seconds + time.time() - started,
+            "rng": rng_state(),
+        }
+
     iterator = iter(batches)
-    window, window_norms, spikes = {}, [], []
-    for step in range(steps):
+    if resume is not None:
+        restore_rng(resume["rng"])
+    for step in range(first, steps):
         try:
             batch = next(iterator)
         except StopIteration:
@@ -119,27 +155,14 @@ def train(
         batch = to_device(batch, device)
         for group in optimizer.param_groups:
             group["lr"] = cosine_lr(step, steps, lr, warmup)
-        terms, _, _ = forward_pair(
-            predictor,
-            batch,
-            mask_key=mask_key,
-            stage3=stage3,
-            depth_correction=depth_correction,
-        )
+        terms, _, _ = forward(predictor, batch, **options)
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
         window_norms.append(torch.nn.utils.clip_grad_norm_(parameters, max_norm).detach())
         if float(window_norms[-1]) > SPIKE_GRAD_NORM:
             spikes.append(
                 spike_report(
-                    predictor,
-                    batch,
-                    parameters,
-                    step,
-                    float(window_norms[-1]),
-                    mask_key,
-                    stage3,
-                    depth_correction,
+                    predictor, batch, parameters, step, float(window_norms[-1]), forward, options
                 )
             )
             print(json.dumps({"spike": spikes[-1]}), flush=True)
@@ -160,7 +183,7 @@ def train(
                 "window": len(window_norms),
             }
             entry.update({key: float(value) / len(window_norms) for key, value in window.items()})
-            entry["seconds"] = time.time() - started
+            entry["seconds"] = earlier_seconds + time.time() - started
             history.append(entry)
             window, window_norms = {}, []
             print(json.dumps(entry), flush=True)
@@ -179,7 +202,9 @@ def train(
         stop = False
         if callback is not None:
             record_peak_memory(out_dir)
-            stop = callback(step, out_of_time or step == steps - 1)
+            stop = callback(
+                step, out_of_time or step == steps - 1, lambda: checkpoint_state(step + 1)
+            )
         if out_of_time:
             print(f"stopping at step {step}: time budget reached", flush=True)
             break

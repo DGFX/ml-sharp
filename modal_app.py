@@ -189,21 +189,11 @@ def stage1(
     return {"passed": report["passed"], "out_dir": str(out_dir)}
 
 
-def train_loader(scenes, seed):
-    import torch
-    from sharp_train.data import HypersimPairs
+def train_loader(scenes, seed, start=0):
+    from sharp_train.data import HypersimPairs, train_stream
 
     dataset = HypersimPairs(DATA_ROOT, scenes=scenes)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=True,
-        num_workers=6,
-        drop_last=True,
-        persistent_workers=True,
-        generator=torch.Generator().manual_seed(seed),
-    )
-    return dataset, loader
+    return dataset, train_stream(dataset, seed, start, workers=6)
 
 
 @app.function(gpu=GPU, timeout=25 * 60, volumes={VOLUME_ROOT: volume})
@@ -321,7 +311,7 @@ def stage2_train(
     val_history = [{"step": 0, **stage2.validation_loss(predictor, validation, device)}]
     print(json.dumps({"validation": val_history[-1]}), flush=True)
 
-    def callback(step, last):
+    def callback(step, last, state):
         done = step + 1
         if done % val_every == 0 or last:
             val_history.append(
@@ -533,6 +523,7 @@ def stage3_train(
     backbone_bf16: int = 0,
     grad_clip: float = 1000.0,
     kill_val_ratio: float = 0.0,
+    resume: str = "",
 ):
     import torch
     from sharp_train import losses, stage2, stage3, train, viz
@@ -540,8 +531,20 @@ def stage3_train(
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
     apple_checkpoint = ensure_checkpoint()
+    resumed = stage2.read_resume(volume_path(resume)) if resume else None
+    if resumed is not None:
+        saved = resumed["meta"]
+        grid, steps, lr, warmup, seed = (
+            saved[key] for key in ("grid", "steps", "lr", "warmup", "seed")
+        )
+        val_every, checkpoint_every = saved["val_every"], saved["checkpoint_every"]
+        depth_correction, grad_clip = saved["depth_correction"], saved["grad_clip"]
+        kill_val_ratio = saved["kill_val_ratio"]
+        grad_checkpointing, backbone_bf16 = saved["grad_checkpointing"], saved["backbone_bf16"]
+        train_scenes, init_checkpoint = ",".join(saved["train_scenes"]), resume
+    first_step = resumed["training"]["next_step"] if resumed is not None else 0
     _, val, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
-    train_set, loader = train_loader(scenes, seed)
+    train_set, loader = train_loader(scenes, seed, first_step)
     validation = stage2.validation_batches(DATA_ROOT, val["pairs"])
     torch.manual_seed(seed)
     predictor, init_step, init_path = load_stage3_predictor(
@@ -554,41 +557,55 @@ def stage3_train(
     )
     loss = stage3.Stage3Loss(device)
     correction = bool(depth_correction)
-    meta = {
-        "grid": grid,
-        "input_resolution": predictor.input_resolution,
-        "train_scenes": scenes,
-        "train_pairs": len(train_set),
-        "validation_scene": val["scene"],
-        "validation_pairs": val["pairs"],
-        "steps": steps,
-        "lr": lr,
-        "warmup": warmup,
-        "seed": seed,
-        "gpu": torch.cuda.get_device_name(),
-        "init_checkpoint": str(init_path),
-        "init_step": init_step,
-        "depth_correction": correction,
-        "grad_clip": grad_clip,
-        "kill_val_ratio": kill_val_ratio,
-        "weights": losses.STAGE3_WEIGHTS,
-        "source_grid": predictor.source_grid,
-        "scale_prior_ratio": predictor.scale_prior_ratio,
-        "grad_checkpointing": bool(grad_checkpointing),
-        "backbone_bf16": bool(backbone_bf16),
-    }
-    stage2.save_json(out_dir / "train_meta.json", meta)
-    val_history = [
-        {
-            "step": 0,
-            **stage2.validation_loss(
-                predictor, validation, device, stage3=loss, depth_correction=correction
-            ),
+    if resumed is not None:
+        meta = {
+            **resumed["meta"],
+            "resumed_from": [
+                *resumed["meta"].get("resumed_from", []),
+                {"checkpoint": str(init_path), "step": first_step},
+            ],
         }
-    ]
-    print(json.dumps({"validation": val_history[-1]}), flush=True)
+        val_history = resumed["val_history"]
+        print(json.dumps({"resumed": str(init_path), "next_step": first_step}), flush=True)
+    else:
+        meta = {
+            "grid": grid,
+            "input_resolution": predictor.input_resolution,
+            "train_scenes": scenes,
+            "train_pairs": len(train_set),
+            "validation_scene": val["scene"],
+            "validation_pairs": val["pairs"],
+            "steps": steps,
+            "lr": lr,
+            "warmup": warmup,
+            "seed": seed,
+            "val_every": val_every,
+            "checkpoint_every": checkpoint_every,
+            "gpu": torch.cuda.get_device_name(),
+            "init_checkpoint": str(init_path),
+            "init_step": init_step,
+            "depth_correction": correction,
+            "grad_clip": grad_clip,
+            "kill_val_ratio": kill_val_ratio,
+            "weights": losses.STAGE3_WEIGHTS,
+            "source_grid": predictor.source_grid,
+            "scale_prior_ratio": predictor.scale_prior_ratio,
+            "grad_checkpointing": bool(grad_checkpointing),
+            "backbone_bf16": bool(backbone_bf16),
+        }
+        val_history = [
+            {
+                "step": 0,
+                **stage2.validation_loss(
+                    predictor, validation, device, stage3=loss, depth_correction=correction
+                ),
+            }
+        ]
+        print(json.dumps({"validation": val_history[-1]}), flush=True)
+    stage2.save_json(out_dir / "train_meta.json", meta)
+    stage2.save_json(out_dir / "val_history.json", val_history)
 
-    def callback(step, last):
+    def callback(step, last, state):
         done = step + 1
         killed = False
         if done % val_every == 0 or last:
@@ -610,7 +627,10 @@ def stage3_train(
         if done % checkpoint_every == 0 or last or killed:
             name = "final" if last or killed else f"step_{done:06d}"
             stage2.save_checkpoint(
-                predictor, out_dir / "checkpoints" / f"{name}.pt", done, {"meta": meta}
+                predictor,
+                out_dir / "checkpoints" / f"{name}.pt",
+                done,
+                {"meta": meta, "training": state(), "val_history": val_history},
             )
             volume.commit()
         return killed
@@ -629,6 +649,7 @@ def stage3_train(
         stage3=loss,
         depth_correction=correction,
         grad_clip=grad_clip,
+        resume=resumed["training"] if resumed is not None else None,
     )
     curve_keys = ["total", "color_src", "color_tgt", "alpha", "percep", "depth_tgt"]
     viz.save_curve(history, curve_keys, out_dir / "train_curve.png", f"{run_name} train")
@@ -681,6 +702,7 @@ def main(
     backbone_bf16: int = 0,
     grad_clip: float = 1000.0,
     kill_val_ratio: float = 0.0,
+    resume: str = "",
 ):
     minutes = resolved_max_minutes(max_minutes, grid)
     if task == "stage1":
@@ -761,6 +783,7 @@ def main(
                     backbone_bf16,
                     grad_clip,
                     kill_val_ratio,
+                    resume,
                 )
             )
         elif mode == "eval":
