@@ -537,7 +537,7 @@ Gate 1, against the previous best, for every stage:
 python scripts/compare_eval.py --base <previous best report.json> --new <new report.json>
 ```
 
-It exits 1 unless LPIPS, DISTS and hole fraction are no worse than the base, and LPIPS is no worse by more than 0.005 in any scene. The eval has 26 pairs from 2 scenes, and the paired LPIPS standard error is 0.002 to 0.004. Differences under 0.005 are not distinguishable. Pick the stage's checkpoint by this gate and by validation, not by repeated peeking at single eval numbers.
+It exits 1 unless LPIPS, DISTS and hole fraction are each no worse than the base by more than `--noise-k` (default 1) paired standard errors, and LPIPS is no worse by more than 0.005 in any scene. E2 passes this gate against r2. The eval has 26 pairs from 2 scenes, and the paired LPIPS standard error is 0.002 to 0.004. Differences under 0.005 are not distinguishable. Pick the stage's checkpoint by this gate and by validation, not by repeated peeking at single eval numbers.
 
 Gate 2, absolute targets, inference setting:
 
