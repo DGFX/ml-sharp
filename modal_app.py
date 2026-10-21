@@ -398,7 +398,7 @@ def evaluate_run(run_name, checkpoints):
     summaries = {}
     for name in checkpoints.split(","):
         path = out_dir / "checkpoints" / f"{name}.pt"
-        meta = torch.load(path, map_location="cpu", weights_only=True, mmap=True)["meta"]
+        meta = torch.load(path, map_location="cpu", weights_only=True, mmap=True).get("meta", {})
         ours, step = stage2.load_checkpoint(
             apple_checkpoint, path, backbone_bf16=meta.get("backbone_bf16", False)
         )
