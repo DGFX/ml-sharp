@@ -409,7 +409,7 @@ def throughput_check(
     started = None
     timings = []
 
-    def callback(step, last):
+    def callback(step, last, state):
         nonlocal started
         torch.cuda.synchronize()
         now = time.time()

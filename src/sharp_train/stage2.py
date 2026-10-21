@@ -50,6 +50,7 @@ def save_checkpoint(grid_predictor, path, step, extra=None):
         "grid": grid_predictor.grid,
         "step": step,
         "state_dict": trained_state(grid_predictor),
+        "scale_factor": grid_predictor.predictor.init_model.scale_factor,
     }
     payload.update(extra or {})
     partial = path.with_suffix(".partial")
@@ -76,8 +77,17 @@ def load_checkpoint(
     ]
     if unexpected_missing or result.unexpected_keys:
         raise KeyError(f"checkpoint mismatch: {unexpected_missing} {result.unexpected_keys}")
+    if "scale_factor" in payload:
+        grid_predictor.predictor.init_model.scale_factor = payload["scale_factor"]
     model.rescale_base_scale(grid_predictor, source_grid)
     return grid_predictor, payload["step"]
+
+
+def read_resume(path):
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if "training" not in payload:
+        raise ValueError(f"{path} has no training state; only checkpoints saved with it resume")
+    return payload
 
 
 def psnr(rendered, target, mask):
