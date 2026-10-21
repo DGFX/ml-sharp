@@ -397,9 +397,13 @@ def evaluate_run(run_name, checkpoints):
     apple = model.build_predictor(apple_checkpoint).to(device)
     summaries = {}
     for name in checkpoints.split(","):
+        path = out_dir / "checkpoints" / f"{name}.pt"
+        meta = torch.load(path, map_location="cpu", weights_only=True, mmap=True).get("meta", {})
         ours, step = stage2.load_checkpoint(
-            apple_checkpoint, out_dir / "checkpoints" / f"{name}.pt"
+            apple_checkpoint, path, backbone_bf16=meta.get("backbone_bf16", False)
         )
+        if ours.depth_head == "apple":
+            print(json.dumps({"depth_head": "apple", "checkpoint": str(path)}), flush=True)
         ours = ours.to(device)
         label = f"ours_{ours.grid}_step{step}"
         predictors = {
@@ -409,7 +413,12 @@ def evaluate_run(run_name, checkpoints):
         }
         eval_dir = out_dir / "eval" / name
         report = stage2.evaluate(predictors, eval_set, device, eval_dir)
-        report["checkpoint"] = {"name": name, "step": step, "grid": ours.grid}
+        report["checkpoint"] = {
+            "name": name,
+            "step": step,
+            "grid": ours.grid,
+            "depth_head": ours.depth_head,
+        }
         report["videos"] = [
             stage2.render_videos(
                 {"apple_768": apple, label: ours}, eval_set, index, device, eval_dir
@@ -437,6 +446,7 @@ def load_stage3_predictor(
     device,
     grad_checkpointing=False,
     backbone_bf16=False,
+    require_depth_head=False,
 ):
     from sharp_train import stage2
 
@@ -449,7 +459,10 @@ def load_stage3_predictor(
         grid=grid,
         grad_checkpointing=grad_checkpointing,
         backbone_bf16=backbone_bf16,
+        require_depth_head=require_depth_head,
     )
+    if predictor.depth_head == "apple":
+        print(json.dumps({"depth_head": "apple", "checkpoint": str(path)}), flush=True)
     return predictor.to(device), step, path
 
 
@@ -573,6 +586,7 @@ def stage3_train(
         device,
         grad_checkpointing=bool(grad_checkpointing),
         backbone_bf16=bool(backbone_bf16),
+        require_depth_head=resumed is not None,
     )
     perceptual = losses.PerceptualLoss().to(device)
     correction = bool(depth_correction)
@@ -610,6 +624,7 @@ def stage3_train(
             "scale_prior_ratio": predictor.scale_prior_ratio,
             "grad_checkpointing": bool(grad_checkpointing),
             "backbone_bf16": bool(backbone_bf16),
+            **stage2.depth_head_meta(predictor),
         }
     history, val_history = run.run_training(
         predictor,
