@@ -119,7 +119,7 @@ def cpu_check(apple_checkpoint, image_path, workdir, grid=CHECK_GRID):
         },
         "colors": {
             "max_abs": float(colors_abs.max()),
-            "compared_as": "model linearRGB against the ply sRGB SH DC converted back to linearRGB by load_ply",
+            "compared_as": "model linearRGB vs ply sRGB SH DC converted back by load_ply",
         },
         "opacities": {
             "max_abs": float(opacities_abs.max()),
