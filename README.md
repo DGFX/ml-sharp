@@ -104,7 +104,7 @@ One image in, one `.ply` Gaussian splat out, from a checkpoint we trained (writt
 
 ```bash
 PYTHONPATH=src python -m sharp_train.predict --checkpoint final.pt --image photo.jpg --out photo.ply
-modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply
+modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply --max-usd 0.56
 PYTHONPATH=src python -m sharp_train.predict --check --image data/teaser.jpg
 ```
 

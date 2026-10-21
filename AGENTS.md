@@ -23,8 +23,8 @@ These are our stages, not the paper's two-stage curriculum.
 | Stage | Goal | Status |
 | --- | --- | --- |
 | 1 | Prove the training loop: view-pair loader, forward, gsplat render in both views, L1 on color and disparity. Gradient check, Apple-weights check, overfit check. | `skills/verify-ml-sharp` |
-| 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks`, then `--task stage2-train`, then `--task stage2-eval` |
-| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Finetune the stage 3 run 2 checkpoint at grid 384 (`A100-40GB`) or 768 (`H100`). Override the GPU with `--gpu` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check`, then `--mode train`, then `--mode eval` |
+| 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks --max-usd 0.93`, then `--task stage2-train --max-usd 2.97`, then `--task stage2-eval --max-usd 1.49` |
+| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Finetune the stage 3 run 2 checkpoint at grid 384 (`A100-40GB`) or 768 (`H100`). Override the GPU with `--gpu` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check --max-usd 1.67`, then `--mode train --max-usd 4.46`, then `--mode eval --max-usd 2.23` |
 
 ## Where things run
 
@@ -59,11 +59,11 @@ These are our stages, not the paper's two-stage curriculum.
 | `npm install` | Optional: installs the DGFX harness and syncs skills. Needs GitHub access and skips itself without it. |
 | `npm run skills:check` | Vendored skills match `skills.lock` |
 | `python scripts/prepare_hypersim.py --out DIR --scenes ai_001_001 ...` | Download a Hypersim subset by HTTP range requests and convert it |
-| `modal run modal_app.py --task stage1` | Stage 1 checks |
+| `modal run modal_app.py --task stage1 --max-usd 1.67` | Stage 1 checks |
 | `python scripts/pick_eval_pairs.py --pairs DIR/pairs.json` | Regenerate the fixed eval list `src/sharp_train/eval_pairs.json` and the validation list `src/sharp_train/val_pairs.json` (held-out train scene `ai_011_001`) |
 | `python scripts/compare_eval.py --base A/report.json --new B/report.json` | Paired eval comparison and the stage 3 pass gate (exit 1 on fail) |
 | `PYTHONPATH=src python -m sharp_train.stage3 --data DIR` | Stage 3 CPU checks on Apple's weights and real pairs. `DIR` holds `ai_005_001`, `ai_007_001`, `ai_011_001`. |
-| `PYTHONPATH=src python -m sharp_train.predict --checkpoint final.pt --image photo.jpg --out photo.ply` | One image to a `.ply` splat with our checkpoint. On Modal: `modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply`. |
+| `PYTHONPATH=src python -m sharp_train.predict --checkpoint final.pt --image photo.jpg --out photo.ply` | One image to a `.ply` splat with our checkpoint. On Modal: `modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply --max-usd 0.56`. |
 | `PYTHONPATH=src python -m sharp_train.predict --check --image data/teaser.jpg` | CPU check: the `.ply` loads back and matches the model's own Gaussians (exit 1 on fail) |
 
 ## Always on

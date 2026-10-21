@@ -18,16 +18,16 @@ PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
 
 ```
 PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
-modal run modal_app.py --task stage3 --mode check --run-name stage3-check-<sha>
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --steps 8000 --max-minutes 90 --timeout-minutes 120
-modal run modal_app.py --task stage3 --mode eval --run-name stage3-<sha> --checkpoints final
+modal run modal_app.py --task stage3 --mode check --run-name stage3-check-<sha> --max-usd 1.67
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-<sha> --steps 8000 --max-minutes 90 --timeout-minutes 120 --max-usd 4.46
+modal run modal_app.py --task stage3 --mode eval --run-name stage3-<sha> --checkpoints final --max-usd 2.23
 ```
 
 Grid 384 stays on `A100-40GB`. Grid 768 selects `H100` unless `--gpu` or `STAGE3_GPU` is set. Timeouts and the in-loop budget scale by `(grid / 192) ** 2` when `--timeout-minutes` and `--max-minutes` are omitted.
 
 ```
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1 --max-usd 17.84
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --timeout-minutes 840 --max-usd 58.8
 ```
 
 ## Driving it with modal

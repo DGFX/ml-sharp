@@ -11,9 +11,9 @@ Short training run with a 192 x 192 Gaussian grid (instead of 768) and matching 
 ## How to get to it (user POV)
 
 ```
-modal run modal_app.py --task stage2-checks --run-name stage2-checks-<sha>
-modal run --detach modal_app.py --task stage2-train --run-name stage2-<sha> --steps 8000 --max-minutes 52
-modal run modal_app.py --task stage2-eval --run-name stage2-<sha> --checkpoints step_004000,final
+modal run modal_app.py --task stage2-checks --run-name stage2-checks-<sha> --max-usd 0.93
+modal run --detach modal_app.py --task stage2-train --run-name stage2-<sha> --steps 8000 --max-minutes 52 --max-usd 2.97
+modal run modal_app.py --task stage2-eval --run-name stage2-<sha> --checkpoints step_004000,final --max-usd 1.49
 ```
 
 ## Driving it with modal
