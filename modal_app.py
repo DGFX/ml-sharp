@@ -51,7 +51,8 @@ image = (
     )
     .run_commands(
         "python -c 'from torchvision.models import ResNet50_Weights, resnet50; "
-        "resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)'"
+        "resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)'",
+        "python -c 'import lpips, piq; lpips.LPIPS(net=\"alex\", verbose=False); piq.DISTS()'",
     )
     .env({"PYTHONPATH": "/root/repo/src", "PYTHONUNBUFFERED": "1"})
     .add_local_dir("src", "/root/repo/src")
@@ -445,7 +446,7 @@ def evaluate_run(run_name, checkpoints):
         volume.commit()
         summaries[name] = report["mean"]
         print(json.dumps({name: report["mean"]}), flush=True)
-        del ours
+        del ours, predictors
         torch.cuda.empty_cache()
     return summaries
 

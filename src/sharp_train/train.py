@@ -75,13 +75,15 @@ def term_grad_norms(terms, parameters):
 
 def spike_report(predictor, batch, parameters, step, grad_norm, forward, options):
     terms, _, _ = forward(predictor, batch, **options)
-    return {
+    report = {
         "step": step,
         "pairs": list(batch["name"]),
         "grad_norm": grad_norm,
         "terms": summarize(terms),
         "term_grad_norms": term_grad_norms(terms, parameters),
     }
+    predictor.training_state = None
+    return report
 
 
 def val_regressed(val_history, ratio):
