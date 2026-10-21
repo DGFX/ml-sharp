@@ -63,6 +63,8 @@ These are our stages, not the paper's two-stage curriculum.
 | `python scripts/pick_eval_pairs.py --pairs DIR/pairs.json` | Regenerate the fixed eval list `src/sharp_train/eval_pairs.json` and the validation list `src/sharp_train/val_pairs.json` (held-out train scene `ai_011_001`) |
 | `python scripts/compare_eval.py --base A/report.json --new B/report.json` | Paired eval comparison and the stage 3 pass gate (exit 1 on fail) |
 | `PYTHONPATH=src python -m sharp_train.stage3 --data DIR` | Stage 3 CPU checks on Apple's weights and real pairs. `DIR` holds `ai_005_001`, `ai_007_001`, `ai_011_001`. |
+| `PYTHONPATH=src python -m sharp_train.predict --checkpoint final.pt --image photo.jpg --out photo.ply` | One image to a `.ply` splat with our checkpoint. On Modal: `modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply`. |
+| `PYTHONPATH=src python -m sharp_train.predict --check --image data/teaser.jpg` | CPU check: the `.ply` loads back and matches the model's own Gaussians (exit 1 on fail) |
 
 ## Always on
 
