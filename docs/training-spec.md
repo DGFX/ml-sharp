@@ -125,3 +125,5 @@ Global gradient clipping is `clip_grad_norm_` at `--grad-clip`, default 1000 (`G
 ## Data and license
 
 Training and evaluation use a subset of [Hypersim](https://github.com/apple/ml-hypersim) (Roberts et al., "Hypersim: A Photorealistic Synthetic Dataset for Holistic Indoor Scene Understanding", ICCV 2021). The Hypersim dataset is released under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/); its code is under Apple's sample-code license. Renders, images and videos made from Hypersim scenes must credit Hypersim, and redistributed derived data must stay under CC BY-SA 3.0. The data is never committed; it lives on the Modal volume. Weights trained from Apple's checkpoint stay under [LICENSE_MODEL](../LICENSE_MODEL) (research use only).
+
+Plan for more Hypersim scenes, the license questions on releasing weights, our own Blender data and the bigger training runs: [data-scaling.md](data-scaling.md).
