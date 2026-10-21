@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from sharp_train import losses, model, multigrid, stage2, train
+from sharp_train import losses, model, multigrid, run, stage2, train
 from sharp_train.data import EpochShuffleSampler, HypersimPairs, train_stream
 
 CHECK_GRID = 192
@@ -171,39 +171,40 @@ def perceptual_check(batch):
     }
 
 
-def train_segment(apple_path, checkpoint, dataset, out_dir, start=0, resume=None, stop_after=None):
+def train_segment(
+    apple_path, checkpoint, dataset, validation, out_dir, steps=RESUME_STEPS, start=0, resume=None
+):
     torch.manual_seed(0)
     predictor, _ = stage2.load_checkpoint(str(apple_path), checkpoint)
-    captured = {}
-
-    def callback(step, last, state):
-        stopping = step + 1 == stop_after
-        if stopping:
-            stage2.save_checkpoint(
-                predictor, Path(out_dir) / "resume.pt", step + 1, {"training": state()}
-            )
-        if stopping or last:
-            captured.update(state())
-        return stopping
-
-    train.train(
+    run.run_training(
         predictor,
         train_stream(dataset, 0, start),
-        RESUME_STEPS,
+        validation,
         out_dir,
+        {"grid": CHECK_GRID, "steps": steps},
+        commit=lambda: None,
+        run_name=out_dir.name,
+        steps=steps,
         lr=1e-4,
         warmup=2,
+        max_minutes=math.inf,
+        checkpoint_every=RESUME_SPLIT,
+        val_every=RESUME_SPLIT,
         log_every=3,
-        callback=callback,
-        resume=resume,
+        depth_correction=True,
+        grad_clip=losses.GRAD_CLIP_NORM,
+        curve_keys=["total"],
+        kill_val_ratio=0.0,
         forward=regularizer_forward,
+        resume=resume,
     )
     trainable = {
         name
         for name, parameter in predictor.predictor.named_parameters()
         if parameter.requires_grad
     }
-    return stage2.trained_state(predictor), captured, trainable
+    final = stage2.read_resume(out_dir / "checkpoints" / "final.pt")
+    return stage2.trained_state(predictor), final["training"], trainable
 
 
 def max_difference(first, second):
@@ -232,29 +233,29 @@ def resume_check(data_root, apple_path):
     source = stage2.build_grid_predictor(str(apple_path), CHECK_GRID, reset_decoder=False)
     stage2.save_checkpoint(source, initial, 0)
     del source
+    validation = [torch.utils.data.default_collate([dataset[0]])]
     straight, straight_end, trainable = train_segment(
-        apple_path, initial, dataset, workdir / "straight"
+        apple_path, initial, dataset, validation, workdir / "straight"
     )
-    _, stopped, _ = train_segment(
-        apple_path, initial, dataset, workdir / "stopped", stop_after=RESUME_SPLIT
-    )
-    saved = workdir / "stopped" / "resume.pt"
+    saved = workdir / "straight" / "checkpoints" / f"step_{RESUME_SPLIT:06d}.pt"
     payload = stage2.read_resume(saved)
     resumed, resumed_end, _ = train_segment(
         apple_path,
         saved,
         dataset,
+        validation,
         workdir / "resumed",
         start=payload["training"]["next_step"],
-        resume=payload["training"],
+        resume=payload,
     )
     restarted, _, _ = train_segment(
         apple_path,
         saved,
         dataset,
+        validation,
         workdir / "restarted",
+        steps=RESUME_STEPS - RESUME_SPLIT,
         start=RESUME_SPLIT,
-        stop_after=RESUME_STEPS - RESUME_SPLIT,
     )
     weight_gap = max_difference(straight, resumed)
     optimizer_gap = optimizer_difference(straight_end["optimizer"], resumed_end["optimizer"])
@@ -274,8 +275,7 @@ def resume_check(data_root, apple_path):
         "criteria": {
             "seeked sampler continues the stream across an epoch": seeked
             == stream[size - 1 : 2 * size],
-            "checkpoint resumes at the next step mid log window": stopped["next_step"]
-            == payload["training"]["next_step"]
+            "checkpoint resumes at the next step mid log window": payload["training"]["next_step"]
             == RESUME_SPLIT
             and len(payload["training"]["window_norms"]) == 1,
             "checkpoint holds every trainable parameter": trainable <= set(payload["state_dict"]),
