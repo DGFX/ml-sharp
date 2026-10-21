@@ -127,7 +127,6 @@ def train(
         window = {key: value.to(device) for key, value in resume["window"].items()}
         window_norms = list(resume["window_norms"].to(device).unbind())
         first, earlier_seconds = resume["next_step"], resume["seconds"]
-        restore_rng(resume["rng"])
         (out_dir / "history.json").write_text(json.dumps(history, indent=1))
         (out_dir / "spikes.json").write_text(json.dumps(spikes, indent=1))
     started = time.time()
@@ -145,6 +144,8 @@ def train(
         }
 
     iterator = iter(batches)
+    if resume is not None:
+        restore_rng(resume["rng"])
     for step in range(first, steps):
         try:
             batch = next(iterator)
