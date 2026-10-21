@@ -532,6 +532,7 @@ def stage3_train(
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
     grad_clip: float = 1000.0,
+    kill_val_ratio: float = 0.0,
 ):
     import torch
     from sharp_train import losses, stage2, stage3, train, viz
@@ -569,6 +570,7 @@ def stage3_train(
         "init_step": init_step,
         "depth_correction": correction,
         "grad_clip": grad_clip,
+        "kill_val_ratio": kill_val_ratio,
         "weights": losses.STAGE3_WEIGHTS,
         "source_grid": predictor.source_grid,
         "scale_prior_ratio": predictor.scale_prior_ratio,
@@ -588,6 +590,7 @@ def stage3_train(
 
     def callback(step, last):
         done = step + 1
+        killed = False
         if done % val_every == 0 or last:
             val_history.append(
                 {
@@ -598,13 +601,19 @@ def stage3_train(
                 }
             )
             print(json.dumps({"validation": val_history[-1]}), flush=True)
+            killed = train.val_regressed(val_history, kill_val_ratio)
+            if killed:
+                meta["killed_at_step"] = done
+                stage2.save_json(out_dir / "train_meta.json", meta)
+                print(json.dumps({"killed": done, "kill_val_ratio": kill_val_ratio}), flush=True)
             stage2.save_json(out_dir / "val_history.json", val_history)
-        if done % checkpoint_every == 0 or last:
-            name = "final" if last else f"step_{done:06d}"
+        if done % checkpoint_every == 0 or last or killed:
+            name = "final" if last or killed else f"step_{done:06d}"
             stage2.save_checkpoint(
                 predictor, out_dir / "checkpoints" / f"{name}.pt", done, {"meta": meta}
             )
             volume.commit()
+        return killed
 
     history = train.train(
         predictor,
@@ -634,6 +643,7 @@ def stage3_train(
         "train_last": history[-1],
         "val_first": val_history[0],
         "val_last": val_history[-1],
+        "killed_at_step": meta.get("killed_at_step"),
         "peak_memory_gb": torch.cuda.max_memory_allocated() / 1e9,
     }
 
@@ -670,6 +680,7 @@ def main(
     grad_checkpointing: int = 0,
     backbone_bf16: int = 0,
     grad_clip: float = 1000.0,
+    kill_val_ratio: float = 0.0,
 ):
     minutes = resolved_max_minutes(max_minutes, grid)
     if task == "stage1":
@@ -749,6 +760,7 @@ def main(
                     grad_checkpointing,
                     backbone_bf16,
                     grad_clip,
+                    kill_val_ratio,
                 )
             )
         elif mode == "eval":

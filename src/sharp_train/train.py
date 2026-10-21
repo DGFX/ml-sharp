@@ -7,6 +7,8 @@ import torch
 
 from sharp_train import losses, model, render, viz
 
+SPIKE_GRAD_NORM = 1e4
+
 
 def to_device(batch, device):
     return {
@@ -52,6 +54,34 @@ def summarize(terms):
     return {key: float(value.detach()) for key, value in terms.items()}
 
 
+def term_grad_norms(terms, parameters):
+    norms = {}
+    for key, value in {**losses.weighted_terms(terms), "total": terms["total"]}.items():
+        if not value.requires_grad:
+            continue
+        grads = torch.autograd.grad(value, parameters, retain_graph=True, allow_unused=True)
+        squares = [grad.square().sum() for grad in grads if grad is not None]
+        norms[key] = float(torch.stack(squares).sum().sqrt()) if squares else 0.0
+    return norms
+
+
+def spike_report(predictor, batch, parameters, step, grad_norm, mask_key, stage3, depth_correction):
+    terms, _, _ = forward_pair(
+        predictor, batch, mask_key=mask_key, stage3=stage3, depth_correction=depth_correction
+    )
+    return {
+        "step": step,
+        "pairs": list(batch["name"]),
+        "grad_norm": grad_norm,
+        "terms": summarize(terms),
+        "term_grad_norms": term_grad_norms(terms, parameters),
+    }
+
+
+def val_regressed(val_history, ratio):
+    return bool(ratio) and val_history[-1]["total"] > ratio * val_history[0]["total"]
+
+
 def train(
     predictor,
     batches,
@@ -79,7 +109,7 @@ def train(
     history = []
     started = time.time()
     iterator = iter(batches)
-    window, window_norms = {}, []
+    window, window_norms, spikes = {}, [], []
     for step in range(steps):
         try:
             batch = next(iterator)
@@ -99,6 +129,21 @@ def train(
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
         window_norms.append(torch.nn.utils.clip_grad_norm_(parameters, max_norm).detach())
+        if float(window_norms[-1]) > SPIKE_GRAD_NORM:
+            spikes.append(
+                spike_report(
+                    predictor,
+                    batch,
+                    parameters,
+                    step,
+                    float(window_norms[-1]),
+                    mask_key,
+                    stage3,
+                    depth_correction,
+                )
+            )
+            print(json.dumps({"spike": spikes[-1]}), flush=True)
+            (out_dir / "spikes.json").write_text(json.dumps(spikes, indent=1))
         optimizer.step()
         for key, value in terms.items():
             window[key] = window.get(key, 0.0) + value.detach()
@@ -131,11 +176,15 @@ def train(
                 depth_correction,
             )
             predictor.train()
+        stop = False
         if callback is not None:
             record_peak_memory(out_dir)
-            callback(step, out_of_time or step == steps - 1)
+            stop = callback(step, out_of_time or step == steps - 1)
         if out_of_time:
             print(f"stopping at step {step}: time budget reached", flush=True)
+            break
+        if stop:
+            print(f"stopping at step {step}: callback asked to stop", flush=True)
             break
     (out_dir / "history.json").write_text(json.dumps(history, indent=1))
     record_peak_memory(out_dir)
