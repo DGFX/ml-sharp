@@ -10,7 +10,7 @@ Upstream SHARP was written for inference. This check proves the training forward
 
 ## How to get to it (user POV)
 
-`modal run modal_app.py --task stage1 --max-usd 1.67 ...`, first JSON line of the log, and `gradient_check` in `stage1_report.json`.
+`modal run modal_app.py --task stage1 --max-usd 1.67 ...`, the first JSON line after the preflight line, and `gradient_check` in `stage1_report.json`.
 
 ## Driving it with modal
 

@@ -464,7 +464,7 @@ Why: E2 `final.pt` pairs E2's decoder and alignment with Apple's head.4 (see the
 Same recipe as E2, 1000 steps, default train scenes (as E2). `<sha>` is any `main` commit at or after `98aed10`.
 
 ```
-modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 1000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 15 --timeout-minutes 25 --max-usd 0.93
+modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 1000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 15 --timeout-minutes 30 --max-usd 1.12
 ```
 
 ```

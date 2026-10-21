@@ -27,7 +27,7 @@ Grid 384 stays on `A100-40GB`. Grid 768 selects `H100` unless `--gpu` or `STAGE3
 
 ```
 modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1 --max-usd 17.84
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --max-usd 134.4
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --timeout-minutes 840 --max-usd 58.8
 ```
 
 ## Driving it with modal
