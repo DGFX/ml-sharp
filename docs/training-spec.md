@@ -58,6 +58,8 @@ These are already in `src/sharp/models/composer.py` and `params.py`.
 
 `src/sharp_train/val_pairs.json` is the validation set for the held-out loss during training: 8 pairs from `ai_011_001`, spread over the baseline the same way. `ai_011_001` is a training scene taken out of training, so validation shares no scene and no pair with eval. `stage2.held_out_split` drops the eval scenes and the validation scene from the training scenes. The older `validation_pairs` key in `eval_pairs.json` lists 8 eval pairs. Nothing reads it anymore, and the file is left unchanged so the eval set stays fixed. On aarch64, regenerating from a fresh `pairs.json` swaps 4 eval pairs for their reverse or for a pair with the same baseline, because `pick` breaks ties by input order. Do not regenerate `eval_pairs.json` to compare runs.
 
+Run r2 (`stage3-g384-5868a6c-r2`) predates this split and trained on `ai_011_001`. A replay of its loader puts 49 of its 2000 steps on that scene, trains 3 of the 8 validation pairs directly and shows 11 of the 12 validation frames. Validation numbers of r2 descendants (E1, E2, A0) are therefore optimistic. The eval scenes stay clean. A clean validation scene needs new data that no ancestor trained on.
+
 `stage2.evaluate` reports, per pair and averaged, for every checkpoint and always for Apple's weights next to it:
 
 | Metric | View | Region |
@@ -79,7 +81,7 @@ Occluded LPIPS composites the render with the ground truth outside the occluded 
 
 ## Stage 3
 
-`modal run modal_app.py --task stage3 --mode check|train|eval --max-usd 4.46` continues from the stage 3 run 2 checkpoint (default `runs/stage3-b29749e/checkpoints/final.pt`, grid 192). The Gaussian decoder is not reset. Monodepth stays frozen. Adam is fresh. The default warmup is the stage 2 short warmup (`--warmup`, default 300), not the paper's 10k from-scratch warmup. The default learning rate is `1.6e-4` and the default step count is 8000. `--depth-correction` defaults to 0: training and validation use the inference depth path. `--depth-correction 1` feeds ground truth to the alignment and trains it.
+`modal run modal_app.py --task stage3 --mode check|train|eval --max-usd 4.46` continues from the stage 3 run 2 checkpoint (default `runs/stage3-b29749e/checkpoints/final.pt`, grid 192). The Gaussian decoder is not reset. Monodepth stays frozen except head.4, the 2 tensors (66 values) that `replicate_head` in Apple's `create_predictor` makes trainable. Adam is fresh. The default warmup is the stage 2 short warmup (`--warmup`, default 300), not the paper's 10k from-scratch warmup. The default learning rate is `1.6e-4` and the default step count is 8000. `--depth-correction` defaults to 0: training and validation use the inference depth path. `--depth-correction 1` feeds ground truth to the alignment and trains it.
 
 `--grid` may be 384 or 768 even though that checkpoint was trained at 192. `stage2.load_checkpoint(..., grid=)` rebuilds the predictor at the requested grid and loads the convolutional decoder weights. The base splat scale follows grid spacing. The initializer sets it from `2 * scale_factor * stride / image_width`, and image width is twice the grid, so a 192 prior becomes 1/2 at 384 and 1/4 at 768. `rescale_base_scale` stores that ratio on the predictor and multiplies `scale_factor` only when the measured median scale disagrees, which keeps a warm start near the 192 quality.
 

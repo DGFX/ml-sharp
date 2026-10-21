@@ -45,6 +45,7 @@ Each feature in [features/](features/README.md) is one function of `modal_app.py
 | `stage1` | [gradient flow](features/gradient-flow.md), [Apple-weights check](features/apple-weights.md), [overfit](features/overfit.md) |
 | `stage2-checks`, `stage2-train`, `stage2-eval` | [stage 2 smoke](features/stage2-smoke.md) |
 | `stage3 --mode check`, `stage3 --mode train`, `stage3 --mode eval` | [stage 3 losses](features/stage3.md), [multi-grid finetune](features/multigrid.md) |
+| `predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply` | one image to a `.ply` splat with our checkpoint ([training spec](../../docs/training-spec.md)) |
 
 ## Evidence
 
@@ -73,7 +74,7 @@ python scripts/prepare_hypersim.py --out ~/data/hypersim-cpu --scenes ai_005_001
 PYTHONPATH=src python -m sharp_train.stage3 --data ~/data/hypersim-cpu
 ```
 
-The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use. `"passed"` is at the top of the report. On the first validation pair at grid 192, the default stage 3 training forward has to give the same Gaussians as the eval `inference` setting, bit for bit, with a scale map of 1. The alignment gets no gradient and the decoder does. With `--depth-correction 1`, the alignment gets a gradient through the stage 3 regularizers. The split has to keep the validation scene out of eval and train, every eval and validation pair has to load, and the eager perceptual gradient has to match a full backward. Alpha BCE, the perceptual loss on a render, the clip statistics and `hole_fraction_frustum` need gsplat, so they are covered only by the Modal check and eval.
+The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use. `"passed"` is at the top of the report. On the first validation pair at grid 192, the default stage 3 training forward has to give the same Gaussians as the eval `inference` setting, bit for bit, with a scale map of 1. The alignment gets no gradient and the decoder does. With `--depth-correction 1`, the alignment gets a gradient through the stage 3 regularizers. The split has to keep the validation scene out of eval and train, every eval and validation pair has to load, and the eager perceptual gradient has to match a full backward. The spike attribution check requires every live term to get a finite grad norm, the term norms to bound the total, and the total to equal the optimizer's grad norm. The resume check trains straight and with a save and resume in the middle, and requires bit-identical weights, Adam state, history and RNG state, while a restart without the training state must differ. Alpha BCE, the perceptual loss on a render, the clip statistics and `hole_fraction_frustum` need gsplat, so they are covered only by the Modal check and eval.
 
 Multi-grid finetune of the stage 3 run 2 checkpoint is checked on CPU the same way, still without a GPU and without gsplat. The Apple checkpoint is downloaded to `/tmp/sharp-ckpts` on first use (about 2.7 GB). A grid-192 decoder state is then loaded at grid 384:
 
@@ -83,6 +84,8 @@ PYTHONPATH=src python -m sharp_train.multigrid
 
 `"passed"` is at the top. `gaussians` is 294912, two layers of 384 x 384. `scale_384 / scale_192` is 1/2 and `scale_768 / scale_192` is 1/4. Decoder feature and head gradients are non-zero with grad checkpointing on and off, the frozen backbone gradient is 0, and `--backbone-bf16` leaves the backbone with no gradient while an unfrozen block still receives one in FP32. This does not replace a Modal run at grid 384 or 768.
 
+`PYTHONPATH=src python -m sharp_train.predict --check --image data/teaser.jpg` is the CPU prediction check. The written `.ply` must load back and match the model's own Gaussians, and checkpoints with and without head.4 must report the right depth head (exit 1 on fail).
+
 ## Helpers
 
-None beyond `modal_app.py` and `scripts/prepare_hypersim.py`. The GPU checks live in `src/sharp_train/checks.py`. The stage 3 CPU checks live in `src/sharp_train/stage3.py`. The multi-grid CPU checks live in `src/sharp_train/multigrid.py`.
+`modal_app.py` and `scripts/prepare_hypersim.py`. `python scripts/compare_eval.py --base A/report.json --new B/report.json` is the paired eval comparison and the stage 3 pass gate (exit 1 on fail). `python scripts/pick_eval_pairs.py --pairs DIR/pairs.json` regenerates `src/sharp_train/eval_pairs.json` and `src/sharp_train/val_pairs.json`. The GPU checks live in `src/sharp_train/checks.py`. The stage 3 CPU checks live in `src/sharp_train/stage3.py`. The multi-grid CPU checks live in `src/sharp_train/multigrid.py`.

@@ -167,7 +167,7 @@ Rate with 1 core and 4 GiB: 0.0000131 + 4 x 0.00000222 = $0.00002198 per second.
 | --- | --- | --- | --- |
 | Base: 60 s | $0.0013 | $0.13 | $0.33 |
 | Worst: 300 s | $0.0066 | $0.65 | $1.64 |
-| Dry run of the whole candidate pool: 427 scenes x about 10 s, about 1.3 MB each (`measured` on 30 scenes: 39,977,145 B / 30) | $0.0002 | - | $0.09 for 427 |
+| Dry run of the whole candidate pool: 185 scenes x about 10 s, about 1.3 MB each (`measured` on 30 scenes: 39,977,145 B / 30) | $0.0002 | - | $0.04 for 185 |
 
 Prep cost is negligible. The real limits are download speed from Apple's CDN and wall time. At 5 containers and 60 s per scene, 249 scenes take 249 x 60 / 5 = 50 min.
 
@@ -225,7 +225,7 @@ modal run modal_app.py --task merge-pairs
 
 ### Steps
 
-1. Dry run over the candidate pool (about 400 scenes). It reads the zip directory, the pose files and 4 depth frames per scene, applies the scene filters of section 3, and writes nothing to the dataset. It also lists the scenes already on the volume. Cost under $0.10.
+1. Dry run over the candidate pool (about 185 scenes). It reads the zip directory, the pose files and 4 depth frames per scene, applies the scene filters of section 3, and writes nothing to the dataset. It also lists the scenes already on the volume. Cost under $0.10.
 2. Dominik or the orchestrator reads `prep_report.json`, fixes the 150 and 300 lists, and checks the excluded scenes by eye.
 3. Real prep of the 99 new scenes. Then `merge-pairs`.
 4. Run the pair and file checks of section 3 on the merged `pairs.json` (CPU).
@@ -239,7 +239,7 @@ modal run modal_app.py --task merge-pairs
 | --- | --- | --- | --- |
 | Eval, forever | ai_005_001, ai_007_001 | 26 (13 each) | `src/sharp_train/eval_pairs.json` |
 | Validation | ai_011_001 | 8 | `src/sharp_train/val_pairs.json` |
-| Train | everything else in `pairs.json`, or the list passed with `--train-scenes` | 6015 over 51 scenes today (`project`) | `stage2.held_out_split` |
+| Train | everything else in `pairs.json`, or the list passed with `--train-scenes` | 6015 over 51 scenes before #15 (`project`), 2533 over 21 pinhole scenes since (`measured` on the merged pair list) | `stage2.held_out_split` |
 
 `held_out_split` removes the eval and validation scenes from whatever is in `pairs.json`. Adding scenes to `pairs.json` therefore adds them to the default train set. Pass `--train-scenes` to pin the set. The comma list for 300 scenes is about 3.4 kB, which fits on a command line.
 
@@ -252,12 +252,14 @@ From `metadata_camera_parameters.csv`, `metadata_images_split_scene_v1.csv` and 
 | Step | Scenes left |
 | --- | --- |
 | In the camera table | 482 |
-| Pinhole (`|M_proj_02|` and `|M_proj_12|` below 1e-6, as the script checks) | 460 |
-| Pinhole and with public `cam_00` frames | 427 |
-| And at least 20 public frames among the first 40 | 416 |
-| Minus the 3 held-out scenes | 413 |
-| Minus the other scenes of volumes 005, 007, 011 (20 scenes) | 393, in 48 volumes |
-| Of those, in Hypersim's own `train` partition | 314 |
+| Pinhole (`M_proj_01/02/10/12/20/21/30/31` below 1e-6, `M_proj_32` at -1 and fy within 0.1 % of fx, as `is_pinhole` checks) | 197 |
+| Pinhole and with public `cam_00` frames | 185 |
+| And at least 20 public frames among the first 40 | 178 |
+| Minus the 3 held-out scenes | 175 |
+| Minus the other scenes of volumes 005, 007, 011 (15 scenes) | 160, in 45 volumes |
+| Of those, in Hypersim's own `train` partition | 129 |
+
+Before #15 the script checked only `M_proj_02` and `M_proj_12`, and this table counted 460 pinhole scenes. 263 of them are tilt-shift scenes, now excluded through `src/sharp_train/non_pinhole_scenes.json`, so 197 are true pinhole and the rows above are recomputed from the same CSVs.
 
 All 482 scenes are 1024 x 768. 394 of the 449 scenes with public `cam_00` frames have all of the first 40 frames. Frames from trajectories marked `OUTSIDE VIEWING AREA` or `CONTENT FLAGGED FOR REMOVAL` have `included_in_public_release = False`, and the script already skips them (the CSV shows no row with an exclude reason and `True`).
 
@@ -268,7 +270,8 @@ Volume siblings. Hypersim has about 10 scenes per Evermotion volume and the READ
 ### Selection rule
 
 - Nested sets: S51 (today's train scenes) inside S150 inside S300. Runs on different sizes stay comparable.
-- New scenes are taken round-robin over volumes (about 2 per volume for 150, 5 per volume for 300 over 48 volumes), Hypersim `train` partition first, fixed seed 0, so one volume or one room type does not dominate. Living rooms are 121 of 427 candidates (28 %).
+- New scenes are taken round-robin over volumes (about 3 per volume for 150 over 45 volumes), Hypersim `train` partition first, fixed seed 0, so one volume or one room type does not dominate. Living rooms are 56 of 185 candidates (30 %).
+- The pinhole pool has only 160 new scenes, and since #15 `held_out_split` drops 30 tilt-shift scenes of S51, which leaves 21. So S300 no longer fits Hypersim, and the S150 and S300 sizes, pair counts and costs below are estimates against the old 460-scene pool.
 - Every candidate passes the filters below first.
 
 ### Pair generation (reuse the existing logic)
@@ -323,9 +326,9 @@ Thresholds marked `guess` are starting values. Calibrate them on the dry-run rep
 
 | # | Name | Metric | Threshold | Action | Basis |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Not pinhole | `|M_proj_02|` or `|M_proj_12|` at least 1e-6 | any | drop scene (the script does this today) | measured: 22 of 482 scenes |
+| 1 | Not pinhole | any of `|M_proj_01/02/10/12/20/21/30/31|` at least 1e-6, `M_proj_32` not -1, or fy off fx by 0.1 % or more | any | drop scene (the script does this today) | measured: 285 of 482 scenes, 263 of them tilt-shift |
 | 2 | Hypersim exclusion | `included_in_public_release` false (covers `OUTSIDE VIEWING AREA` and flagged content) | any frame | drop frame (the script does this today) | measured |
-| 3 | Too few frames | public frames among the first 40 | below 20 | drop scene | guess. 416 of 427 pass. The sample had 23, 35, 39 |
+| 3 | Too few frames | public frames among the first 40 | below 20 | drop scene | guess. 178 of 185 pass. The sample had 23, 35, 39 |
 | 4 | Missing files | color or depth entry missing in the zip, or `cameras.json` missing a pose for a kept frame | any | drop frame. Drop scene if filter 3 then fails | rule, no threshold |
 | 5 | Corrupt files | PNG does not open as RGB at `(width, height)`; depth `.npy` shape is not `(height, width)`; any pose with a non-finite value | any | drop frame | rule, no threshold |
 | 6 | Bad poses | `|det(R) - 1|` or max `|R^T R - I|` above 1e-3; or a jump between consecutive frames above 5 m | any | drop scene | guess. Measured steps: median 0.95 to 1.38 m, largest 1.94 m in the three prepared scenes |
