@@ -6,7 +6,8 @@ from sharp.models import PredictorParams, create_predictor
 from sharp.utils.gaussians import Gaussians3D, compose_covariance_matrices
 from torch import nn
 
-APPLE_CHECKPOINT_URL = "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
+APPLE_CHECKPOINT_NAME = "sharp_2572gikvuh.pt"
+APPLE_CHECKPOINT_URL = f"https://ml-site.cdn-apple.com/models/sharp/{APPLE_CHECKPOINT_NAME}"
 INTERNAL_RESOLUTION = 1536
 FULL_GRID = 768
 
@@ -33,14 +34,13 @@ def align_depth(alignment, monodepth, gt_depth, features, enabled):
     return corrected, scale[:, :1]
 
 
-def build_predictor(checkpoint=None, grad_checkpointing=False):
+def build_predictor(checkpoint, grad_checkpointing=False):
     params = PredictorParams()
     params.gaussian_decoder.grad_checkpointing = grad_checkpointing
     predictor = create_predictor(params)
-    if checkpoint is not None:
-        state_dict = torch.load(checkpoint, weights_only=True, map_location="cpu", mmap=True)
-        predictor.load_state_dict(state_dict)
-        del state_dict
+    state_dict = torch.load(checkpoint, weights_only=True, map_location="cpu", mmap=True)
+    predictor.load_state_dict(state_dict)
+    del state_dict
     return predictor
 
 
@@ -143,7 +143,7 @@ def rescale_base_scale(grid_predictor, source_grid):
     grid_predictor.source_grid = source_grid
     grid_predictor.scale_prior_ratio = ratio
     if source_grid == target_grid:
-        return ratio
+        return
     initializer = grid_predictor.predictor.init_model
     source_scale = median_base_scale(initializer, resolution_for_grid(source_grid))
     target_scale = median_base_scale(initializer, grid_predictor.input_resolution)
@@ -151,7 +151,6 @@ def rescale_base_scale(grid_predictor, source_grid):
     correction = ratio / measured
     if abs(correction - 1.0) > 1e-3:
         initializer.scale_factor = float(initializer.scale_factor) * correction
-    return ratio
 
 
 def input_resolution(predictor):

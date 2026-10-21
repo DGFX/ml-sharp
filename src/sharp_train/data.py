@@ -13,7 +13,7 @@ def pair_name(pair):
 
 
 class HypersimPairs(torch.utils.data.Dataset):
-    def __init__(self, root, scenes=None, pairs=None, names=None):
+    def __init__(self, root, scenes=None, names=None):
         self.root = Path(root)
         all_pairs = json.loads((self.root / "pairs.json").read_text())
         if scenes is not None:
@@ -24,7 +24,7 @@ class HypersimPairs(torch.utils.data.Dataset):
             if missing:
                 raise KeyError(f"pairs not in {self.root / 'pairs.json'}: {missing}")
             all_pairs = [by_name[name] for name in names]
-        self.pairs = all_pairs if pairs is None else [all_pairs[index] for index in pairs]
+        self.pairs = all_pairs
         self.cameras = {}
 
     def __len__(self):

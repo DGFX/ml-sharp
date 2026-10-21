@@ -12,14 +12,12 @@ def to_uint8(image):
     return (array * 255 + 0.5).astype(np.uint8)
 
 
-def colorize_disparity(depth, valid=None, max_disparity=None):
+def colorize_disparity(depth, max_disparity=None):
     disparity = 1.0 / torch.nan_to_num(depth, nan=1e6).clamp(min=1e-3)
     if max_disparity is None:
         max_disparity = float(torch.quantile(disparity.flatten()[::97].float(), 0.99))
     normalized = (disparity / max(max_disparity, 1e-6)).clamp(0, 1)[0].detach().cpu().numpy()
     colored = matplotlib.colormaps["turbo"](normalized)[..., :3]
-    if valid is not None:
-        colored = colored * valid[0].detach().cpu().numpy()[..., None]
     return (colored * 255 + 0.5).astype(np.uint8)
 
 
@@ -29,10 +27,10 @@ def save_rows(rows, path):
     Image.fromarray(grid).save(path)
 
 
-def save_pair_grid(batch, rendering_src, rendering_tgt, path, index=0):
+def save_pair_grid(batch, rendering_src, rendering_tgt, path):
     max_disparity = float(
         torch.quantile(
-            (1.0 / torch.nan_to_num(batch["depth_src"][index], nan=1e6).clamp(min=1e-3)).flatten()[
+            (1.0 / torch.nan_to_num(batch["depth_src"][0], nan=1e6).clamp(min=1e-3)).flatten()[
                 ::97
             ],
             0.99,
@@ -40,16 +38,16 @@ def save_pair_grid(batch, rendering_src, rendering_tgt, path, index=0):
     )
     rows = [
         [
-            to_uint8(batch["image_src"][index]),
-            to_uint8(rendering_src.color[index]),
-            colorize_disparity(batch["depth_src"][index], max_disparity=max_disparity),
-            colorize_disparity(rendering_src.depth[index], max_disparity=max_disparity),
+            to_uint8(batch["image_src"][0]),
+            to_uint8(rendering_src.color[0]),
+            colorize_disparity(batch["depth_src"][0], max_disparity=max_disparity),
+            colorize_disparity(rendering_src.depth[0], max_disparity=max_disparity),
         ],
         [
-            to_uint8(batch["image_tgt"][index]),
-            to_uint8(rendering_tgt.color[index]),
-            colorize_disparity(batch["depth_tgt"][index], max_disparity=max_disparity),
-            colorize_disparity(rendering_tgt.depth[index], max_disparity=max_disparity),
+            to_uint8(batch["image_tgt"][0]),
+            to_uint8(rendering_tgt.color[0]),
+            colorize_disparity(batch["depth_tgt"][0], max_disparity=max_disparity),
+            colorize_disparity(rendering_tgt.depth[0], max_disparity=max_disparity),
         ],
     ]
     save_rows(rows, path)

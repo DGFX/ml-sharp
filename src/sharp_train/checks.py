@@ -402,7 +402,6 @@ def throughput_check(
     stage3=None,
     depth_correction=True,
     lr=1e-4,
-    warmup=5,
     grad_clip=losses.GRAD_CLIP_NORM,
 ):
     torch.cuda.reset_peak_memory_stats()
@@ -423,7 +422,7 @@ def throughput_check(
         steps,
         out_dir,
         lr=lr,
-        warmup=warmup,
+        warmup=5,
         mask_key="mask_visible_tgt",
         log_every=5,
         callback=callback,

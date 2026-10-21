@@ -9,7 +9,6 @@ VOLUME_NAME = "ml-sharp-data"
 VOLUME_ROOT = Path("/vol")
 DATA_ROOT = VOLUME_ROOT / "hypersim"
 RUNS_ROOT = VOLUME_ROOT / "runs"
-CHECKPOINT_PATH = VOLUME_ROOT / "checkpoints" / "sharp_2572gikvuh.pt"
 GPU = "A100-40GB"
 H100 = "H100"
 BASE_GRID = 192
@@ -59,15 +58,16 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 def ensure_checkpoint():
     import urllib.request
 
-    from sharp_train.model import APPLE_CHECKPOINT_URL
+    from sharp_train.model import APPLE_CHECKPOINT_NAME, APPLE_CHECKPOINT_URL
 
-    if not CHECKPOINT_PATH.exists():
-        CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        partial = CHECKPOINT_PATH.with_suffix(".partial")
+    path = VOLUME_ROOT / "checkpoints" / APPLE_CHECKPOINT_NAME
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(".partial")
         urllib.request.urlretrieve(APPLE_CHECKPOINT_URL, partial)
-        partial.rename(CHECKPOINT_PATH)
+        partial.rename(path)
         volume.commit()
-    return CHECKPOINT_PATH
+    return path
 
 
 def cuda_setup():
@@ -76,11 +76,6 @@ def cuda_setup():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     return torch.device("cuda")
-
-
-def write_json(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=1))
 
 
 def volume_path(path):
@@ -127,7 +122,7 @@ def stage1(
     run_name: str, eval_scenes: str, num_apple_pairs: int, overfit_steps: int, overfit_lr: float
 ):
     import torch
-    from sharp_train import checks, model
+    from sharp_train import checks, model, stage2
     from sharp_train.data import HypersimPairs
 
     device = cuda_setup()
@@ -163,7 +158,7 @@ def stage1(
         ),
         flush=True,
     )
-    write_json(out_dir / "stage1_report.json", report)
+    stage2.save_json(out_dir / "stage1_report.json", report)
     volume.commit()
     report["overfit"] = checks.overfit_check(
         predictor, dataset, indices[0], out_dir, device, overfit_steps, overfit_lr
@@ -174,7 +169,7 @@ def stage1(
         and report["apple_weights"]["passed"]
         and report["overfit"]["passed"]
     )
-    write_json(out_dir / "stage1_report.json", report)
+    stage2.save_json(out_dir / "stage1_report.json", report)
     volume.commit()
     print(
         json.dumps(
@@ -254,7 +249,7 @@ def stage2_checks(
         and report["reset_decoder"]["passed"]
         and report["throughput"]["finite"]
     )
-    write_json(out_dir / "stage2_checks.json", report)
+    stage2.save_json(out_dir / "stage2_checks.json", report)
     volume.commit()
     return {"passed": report["passed"], "throughput": report["throughput"]}
 
@@ -447,7 +442,7 @@ def stage3_check(
     import math
 
     import torch
-    from sharp_train import checks, stage2, stage3
+    from sharp_train import checks, losses, stage2
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
@@ -462,16 +457,15 @@ def stage3_check(
     )
     _, _, scenes = stage2.held_out_split(DATA_ROOT, train_scenes)
     _, loader = train_loader(scenes, 0)
-    loss = stage3.Stage3Loss(device)
+    perceptual = losses.PerceptualLoss().to(device)
     report = checks.throughput_check(
         predictor,
         loader,
         30,
         out_dir / "check",
-        stage3=loss,
+        stage3=perceptual,
         depth_correction=bool(depth_correction),
         lr=1.6e-4,
-        warmup=5,
         grad_clip=grad_clip,
     )
     keys = ["alpha", "percep", "tv", "grad", "delta", "splat", "scale", "grad_scale", "total"]
@@ -481,7 +475,7 @@ def stage3_check(
     report["depth_correction"] = bool(depth_correction)
     report["gpu"] = torch.cuda.get_device_name()
     report["passed"] = bool(report["finite"] and report["losses_finite"])
-    write_json(out_dir / "stage3_check.json", report)
+    stage2.save_json(out_dir / "stage3_check.json", report)
     volume.commit()
     print(
         json.dumps(
@@ -526,7 +520,7 @@ def stage3_train(
     resume: str = "",
 ):
     import torch
-    from sharp_train import losses, stage2, stage3, train, viz
+    from sharp_train import losses, stage2, train, viz
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
@@ -555,7 +549,7 @@ def stage3_train(
         grad_checkpointing=bool(grad_checkpointing),
         backbone_bf16=bool(backbone_bf16),
     )
-    loss = stage3.Stage3Loss(device)
+    perceptual = losses.PerceptualLoss().to(device)
     correction = bool(depth_correction)
     if resumed is not None:
         meta = {
@@ -597,7 +591,7 @@ def stage3_train(
             {
                 "step": 0,
                 **stage2.validation_loss(
-                    predictor, validation, device, stage3=loss, depth_correction=correction
+                    predictor, validation, device, stage3=perceptual, depth_correction=correction
                 ),
             }
         ]
@@ -613,7 +607,11 @@ def stage3_train(
                 {
                     "step": done,
                     **stage2.validation_loss(
-                        predictor, validation, device, stage3=loss, depth_correction=correction
+                        predictor,
+                        validation,
+                        device,
+                        stage3=perceptual,
+                        depth_correction=correction,
                     ),
                 }
             )
@@ -646,7 +644,7 @@ def stage3_train(
         log_every=50,
         max_seconds=max_minutes * 60,
         callback=callback,
-        stage3=loss,
+        stage3=perceptual,
         depth_correction=correction,
         grad_clip=grad_clip,
         resume=resumed["training"] if resumed is not None else None,
