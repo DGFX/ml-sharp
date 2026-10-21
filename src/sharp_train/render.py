@@ -4,7 +4,7 @@ import gsplat
 import torch
 from sharp.utils.color_space import linearRGB2sRGB
 
-LOW_PASS_EPS = 1e-2
+from sharp_train import losses
 
 
 @dataclasses.dataclass
@@ -31,7 +31,7 @@ def render(gaussians, viewmats, intrinsics, width, height):
             render_mode="RGB+D",
             rasterize_mode="classic",
             packed=False,
-            eps2d=LOW_PASS_EPS,
+            eps2d=losses.SPLAT_LOW_PASS,
         )
         output = output.permute(0, 3, 1, 2)
         alpha = alpha.permute(0, 3, 1, 2)

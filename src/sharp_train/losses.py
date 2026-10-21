@@ -66,8 +66,8 @@ def pair_losses(rendering_src, rendering_tgt, batch, tgt_mask_key=None):
     return terms
 
 
-def hole_fraction(alpha, threshold=0.5, mask=None):
-    holes = (alpha < threshold).float()
+def hole_fraction(alpha, mask=None):
+    holes = (alpha < 0.5).float()
     if mask is None:
         return holes.mean()
     return masked_mean(holes, mask)

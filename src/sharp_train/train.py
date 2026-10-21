@@ -37,7 +37,7 @@ def forward_pair(
             batch,
             gaussians,
             predictor.training_state,
-            stage3.perceptual,
+            stage3,
         )
         terms = losses.add_stage3(terms, extra)
     return terms, rendering_src, rendering_tgt
@@ -52,6 +52,13 @@ def cosine_lr(step, total, peak, warmup, final_ratio=0.1):
 
 def summarize(terms):
     return {key: float(value.detach()) for key, value in terms.items()}
+
+
+def grad_norm(parameters):
+    grads = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not grads:
+        return 0.0
+    return float(torch.sqrt(sum((grad.float() ** 2).sum() for grad in grads)))
 
 
 def term_grad_norms(terms, parameters):
@@ -98,8 +105,8 @@ def train(
     batches,
     steps,
     out_dir,
-    lr=1.6e-4,
-    warmup=100,
+    lr,
+    warmup,
     mask_key=None,
     log_every=10,
     snapshot_every=None,
@@ -218,14 +225,13 @@ def train(
 
 def record_peak_memory(out_dir):
     if not torch.cuda.is_available():
-        return None
+        return
     path = Path(out_dir) / "train_meta.json"
     if not path.exists():
-        return None
+        return
     meta = json.loads(path.read_text())
     meta["peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
     path.write_text(json.dumps(meta, indent=1))
-    return meta["peak_memory_gb"]
 
 
 @torch.no_grad()

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import torch
 
-from sharp_train import model, stage2
+from sharp_train import model, stage2, train
 
-CACHE = Path("/tmp/sharp-ckpts/sharp_2572gikvuh.pt")
+CACHE = Path("/tmp/sharp-ckpts") / model.APPLE_CHECKPOINT_NAME
 SOURCE_GRID = 192
 GRID = 384
 
@@ -21,13 +21,6 @@ def ensure_apple():
     urllib.request.urlretrieve(model.APPLE_CHECKPOINT_URL, partial)
     partial.rename(CACHE)
     return CACHE
-
-
-def grad_norm(module):
-    grads = [parameter.grad for parameter in module.parameters() if parameter.grad is not None]
-    if not grads:
-        return 0.0
-    return float(torch.sqrt(sum((grad.float() ** 2).sum() for grad in grads)))
 
 
 def set_checkpointing(grid_predictor, enabled):
@@ -51,9 +44,9 @@ def decoder_backward(grid_predictor):
     return {
         "delta": list(delta.shape),
         "dtype": str(delta.dtype).removeprefix("torch."),
-        "feature_grad": grad_norm(predictor.feature_model),
-        "head_grad": grad_norm(predictor.prediction_head),
-        "backbone_grad": grad_norm(predictor.monodepth_model),
+        "feature_grad": train.grad_norm(predictor.feature_model.parameters()),
+        "head_grad": train.grad_norm(predictor.prediction_head.parameters()),
+        "backbone_grad": train.grad_norm(predictor.monodepth_model.parameters()),
         "grad_checkpointing": bool(predictor.feature_model.grad_checkpointing)
         and bool(predictor.feature_model.decoder.grad_checkpointing),
     }
@@ -75,7 +68,7 @@ def backbone_probe(grid_predictor, enabled):
         "enabled": enabled,
         "dtype": str(features.dtype).removeprefix("torch."),
         "requires_grad": bool(features.requires_grad),
-        "block_grad": grad_norm(block),
+        "block_grad": train.grad_norm(block.parameters()),
     }
     for parameter, flag in zip(block.parameters(), frozen):
         parameter.requires_grad_(flag)

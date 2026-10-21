@@ -16,18 +16,6 @@ RESUME_SPLIT = 2
 GAUSSIAN_FIELDS = ("means", "covariances", "colors", "opacities")
 
 
-class Stage3Loss:
-    def __init__(self, device):
-        self.perceptual = losses.PerceptualLoss().to(device)
-
-
-def grad_norm(parameters):
-    grads = [parameter.grad for parameter in parameters if parameter.grad is not None]
-    if not grads:
-        return 0.0
-    return float(torch.sqrt(sum(grad.square().sum() for grad in grads)))
-
-
 def split_check(data_root):
     spec, val, train_scenes = stage2.held_out_split(data_root)
     held_out = HypersimPairs(data_root, names=spec["pairs"] + val["pairs"])
@@ -70,8 +58,8 @@ def train_step_regularizers(predictor, batch, depth_correction):
         "scale_minus_one": float((state.scale_map.detach() - 1).abs().mean()),
         "terms": {key: float(value.detach()) for key, value in terms.items()},
         "total_finite": math.isfinite(float(total.detach())),
-        "alignment_grad": grad_norm(alignment),
-        "decoder_grad": grad_norm(decoder),
+        "alignment_grad": train.grad_norm(alignment),
+        "decoder_grad": train.grad_norm(decoder),
         "alignment_trainable": all(parameter.requires_grad for parameter in alignment),
     }
 

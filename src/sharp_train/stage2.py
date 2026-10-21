@@ -8,6 +8,11 @@ from sharp_train import losses, model
 
 EVAL_PAIRS_PATH = Path(__file__).with_name("eval_pairs.json")
 VAL_PAIRS_PATH = Path(__file__).with_name("val_pairs.json")
+EVAL_SETTINGS = ("inference", "gt_depth")
+EVAL_IMAGES = 6
+VIDEO_FRAMES = 90
+VIDEO_RADIUS_RATIO = 0.06
+VIDEO_FPS = 30
 
 
 def eval_spec():
@@ -179,16 +184,16 @@ def comparison_rows(batch, renders):
 
 
 @torch.no_grad()
-def evaluate(predictors, dataset, device, out_dir, settings=("inference", "gt_depth"), images=6):
+def evaluate(predictors, dataset, device, out_dir):
     from sharp_train import render, train, viz
 
     metrics = PerceptualMetrics(device)
     out_dir = Path(out_dir)
-    results = {setting: {name: [] for name in predictors} for setting in settings}
+    results = {setting: {name: [] for name in predictors} for setting in EVAL_SETTINGS}
     for index in range(len(dataset)):
         batch = train.to_device(torch.utils.data.default_collate([dataset[index]]), device)
         _, _, height, width = batch["image_src"].shape
-        for setting in settings:
+        for setting in EVAL_SETTINGS:
             depth = batch["depth_src"] if setting == "gt_depth" else None
             renders = {}
             for name, predictor in predictors.items():
@@ -199,7 +204,7 @@ def evaluate(predictors, dataset, device, out_dir, settings=("inference", "gt_de
                 row = {"pair": batch["name"][0], "gaussians": int(gaussians.means.shape[1])}
                 row.update(pair_metrics(metrics, rendering_src, rendering_tgt, batch))
                 results[setting][name].append(row)
-            if setting == "inference" and index < images:
+            if setting == "inference" and index < EVAL_IMAGES:
                 viz.save_rows(
                     comparison_rows(batch, renders), out_dir / f"compare_{batch['name'][0]}.png"
                 )
@@ -214,7 +219,7 @@ def evaluate(predictors, dataset, device, out_dir, settings=("inference", "gt_de
             }
             summary[setting][name]["gaussians"] = rows[0]["gaussians"]
     return {
-        "pairs": [row["pair"] for row in next(iter(results[settings[0]].values()))],
+        "pairs": [row["pair"] for row in next(iter(results[EVAL_SETTINGS[0]].values()))],
         "per_pair": results,
         "mean": summary,
         "image_layout": {
@@ -254,11 +259,11 @@ def camera_path(median_depth, frames, radius_ratio, device):
         yield look_at(eye, target)[None]
 
 
-def write_video(frames, path, fps=30):
+def write_video(frames, path):
     import imageio
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7, macro_block_size=8)
+    writer = imageio.get_writer(path, fps=VIDEO_FPS, codec="libx264", quality=7, macro_block_size=8)
     for frame in frames:
         writer.append_data(frame)
     writer.close()
@@ -273,7 +278,7 @@ def downscale(frame, factor):
 
 
 @torch.no_grad()
-def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius_ratio=0.06):
+def render_videos(predictors, dataset, index, device, out_dir):
     import numpy as np
 
     from sharp_train import render, train, viz
@@ -288,7 +293,7 @@ def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius
     reference = next(iter(gaussians.values()))
     median_depth = float(reference.means[0, ::17, 2].median())
     panels = {label: [] for label in gaussians}
-    for viewmat in camera_path(median_depth, frames, radius_ratio, device):
+    for viewmat in camera_path(median_depth, VIDEO_FRAMES, VIDEO_RADIUS_RATIO, device):
         for label, value in gaussians.items():
             rendering = render.render(value, viewmat, batch["intrinsics"], width, height)
             panels[label].append(viz.to_uint8(rendering.color[0]))
@@ -306,8 +311,8 @@ def render_videos(predictors, dataset, index, device, out_dir, frames=90, radius
     )
     return {
         "pair": name,
-        "frames": frames,
-        "fps": 30,
+        "frames": VIDEO_FRAMES,
+        "fps": VIDEO_FPS,
         "panels": list(panels),
         "median_depth": median_depth,
         "files": paths,
