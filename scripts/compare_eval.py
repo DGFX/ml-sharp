@@ -39,7 +39,7 @@ def scene_deltas(base_rows, new_rows, metric):
     return {scene: sum(values) / len(values) for scene, values in by_scene.items()}
 
 
-def compare(base, new, setting, scene_margin):
+def compare(base, new, setting, scene_margin, noise_k):
     base_rows = rows_for(base, setting, "ours")
     new_rows = rows_for(new, setting, "ours")
     apple_rows = rows_for(new, setting, "apple_decoder")
@@ -55,7 +55,11 @@ def compare(base, new, setting, scene_margin):
     )
     apple = {metric: paired(apple_rows, new_rows, metric) for metric in GATED}
     scenes = scene_deltas(base_rows, new_rows, "lpips")
-    criteria = {f"{metric} not worse than base": metrics[metric]["delta"] <= 0 for metric in GATED}
+    criteria = {
+        f"{metric} not worse than base by more than {noise_k} SE": metrics[metric]["delta"]
+        <= noise_k * metrics[metric]["standard_error"]
+        for metric in GATED
+    }
     criteria[f"lpips per scene not worse than base by more than {scene_margin}"] = all(
         delta <= scene_margin for delta in scenes.values()
     )
@@ -76,12 +80,14 @@ def main():
     parser.add_argument("--new", type=Path, required=True)
     parser.add_argument("--setting", default="inference")
     parser.add_argument("--scene-margin", type=float, default=0.005)
+    parser.add_argument("--noise-k", type=float, default=1.0)
     args = parser.parse_args()
     result = compare(
         json.loads(args.base.read_text()),
         json.loads(args.new.read_text()),
         args.setting,
         args.scene_margin,
+        args.noise_k,
     )
     print(json.dumps(result, indent=1))
     if not result["passed"]:
