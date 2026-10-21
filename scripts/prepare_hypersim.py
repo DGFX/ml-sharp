@@ -15,6 +15,16 @@ ZIP_URL = (
 CAMERA_CSV_URL = "https://raw.githubusercontent.com/apple/ml-hypersim/main/contrib/mikeroberts3000/metadata_camera_parameters.csv"
 SPLIT_CSV_URL = "https://raw.githubusercontent.com/apple/ml-hypersim/main/evermotion_dataset/analysis/metadata_images_split_scene_v1.csv"
 OPENGL_TO_OPENCV = np.diag([1.0, -1.0, -1.0])
+OFF_DIAGONAL_PROJECTION = (
+    "M_proj_01",
+    "M_proj_02",
+    "M_proj_10",
+    "M_proj_12",
+    "M_proj_20",
+    "M_proj_21",
+    "M_proj_30",
+    "M_proj_31",
+)
 
 
 def fetch_csv(url):
@@ -22,6 +32,16 @@ def fetch_csv(url):
 
     with urllib.request.urlopen(url) as response:
         return list(csv.DictReader(io.StringIO(response.read().decode())))
+
+
+def is_pinhole(camera_row):
+    focal_x = float(camera_row["M_proj_00"]) * float(camera_row["settings_output_img_width"])
+    focal_y = float(camera_row["M_proj_11"]) * float(camera_row["settings_output_img_height"])
+    return (
+        all(abs(float(camera_row[name])) < 1e-6 for name in OFF_DIAGONAL_PROJECTION)
+        and abs(float(camera_row["M_proj_32"]) + 1) < 1e-6
+        and abs(focal_y / focal_x - 1) < 1e-3
+    )
 
 
 def read_h5(archive, name):
@@ -143,8 +163,9 @@ def select_pairs(scene_dir, meta, max_offset, min_baseline, max_baseline, min_ov
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--scenes", nargs="+", required=True)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--scenes", nargs="+")
+    parser.add_argument("--write-non-pinhole", type=Path)
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--max-offset", type=int, default=4)
     parser.add_argument("--min-baseline", type=float, default=0.05)
@@ -153,6 +174,13 @@ def main():
     parser.add_argument("--max-overlap", type=float, default=0.995)
     args = parser.parse_args()
     cameras = {row["scene_name"]: row for row in fetch_csv(CAMERA_CSV_URL)}
+    if args.write_non_pinhole:
+        non_pinhole = sorted(scene for scene, row in cameras.items() if not is_pinhole(row))
+        args.write_non_pinhole.write_text(json.dumps(non_pinhole, indent=1) + "\n")
+        print(f"{len(non_pinhole)} of {len(cameras)} scenes are not pinhole")
+        return
+    if not args.out or not args.scenes:
+        parser.error("--out and --scenes are required")
     included = {
         (row["scene_name"], int(row["frame_id"]))
         for row in fetch_csv(SPLIT_CSV_URL)
@@ -162,8 +190,7 @@ def main():
     all_pairs = []
     for scene in args.scenes:
         row = cameras[scene]
-        is_pinhole = abs(float(row["M_proj_02"])) < 1e-6 and abs(float(row["M_proj_12"])) < 1e-6
-        if not is_pinhole:
+        if not is_pinhole(row):
             print(f"skip {scene}: non-pinhole projection")
             continue
         meta = prepare_scene(scene, row, included, args.out, args.frames)

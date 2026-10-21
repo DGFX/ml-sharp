@@ -13,6 +13,7 @@ EVAL_IMAGES = 6
 VIDEO_FRAMES = 90
 VIDEO_RADIUS_RATIO = 0.06
 VIDEO_FPS = 30
+NON_PINHOLE_PATH = Path(__file__).with_name("non_pinhole_scenes.json")
 
 
 def eval_spec():
@@ -26,9 +27,22 @@ def val_spec():
 def held_out_split(data_root, train_scenes=""):
     spec, val = eval_spec(), val_spec()
     held_out = {*spec["scenes"], val["scene"]}
+    non_pinhole = set(json.loads(NON_PINHOLE_PATH.read_text()))
+    if held_out & non_pinhole:
+        raise ValueError(f"eval or val scenes are not pinhole: {sorted(held_out & non_pinhole)}")
     pairs = json.loads((Path(data_root) / "pairs.json").read_text())
-    scenes = train_scenes.split(",") if train_scenes else sorted({pair["scene"] for pair in pairs})
-    return spec, val, [scene for scene in scenes if scene not in held_out]
+    known = sorted({pair["scene"] for pair in pairs})
+    requested = [name.strip() for name in train_scenes.split(",") if name.strip()]
+    unknown = sorted(set(requested) - set(known))
+    if unknown:
+        raise ValueError(f"train scenes not in pairs.json: {unknown}")
+    scenes = requested if train_scenes else known
+    pinhole = [scene for scene in scenes if scene not in non_pinhole]
+    print(f"dropped {len(scenes) - len(pinhole)} non-pinhole train scenes")
+    train = [scene for scene in pinhole if scene not in held_out]
+    if train_scenes and not train:
+        raise ValueError(f"no pinhole train scene left in {train_scenes!r}")
+    return spec, val, train
 
 
 def build_grid_predictor(
