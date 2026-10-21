@@ -12,6 +12,8 @@ Goal: match Apple 768 on LPIPS, DISTS, holes and GT PSNR. Today the best checkpo
 
 E2 already beats the Apple decoder at 384 on LPIPS, DISTS and holes. It loses on frustum holes and GT PSNR, and it is far from Apple 768 on LPIPS and DISTS (0.062 and 0.027).
 
+The E2 numbers are for E2's decoder with Apple's monodepth head.4, not the head E2 trained. Every checkpoint saved before #10 dropped that trained 1x1 conv (66 parameters, the two disparity channels), so loading E2 `final.pt`, for eval or as an init, puts Apple's conv back. The trained conv is lost. How much this changes the numbers is not measured. Step A0 in section 5 measures it and gives E2 a matching head before stage A.
+
 ## Decisions needed from Dominik
 
 1. A lawyer's answer on weight release (section 1) before any weights or renders leave the lab. Training on Modal can go ahead without it.
@@ -455,11 +457,46 @@ modal run modal_app.py --task stage3 --mode check --grid 768 --run-name stage3-g
 
 The E2 recipe: init from a finetuned checkpoint, low peak learning rate, `--depth-correction 1`, clip 1000, kill rule, validation every 500, checkpoint every 1000. Re-warming an annealed checkpoint to 1.6e-4 hurt (run 12k). 4e-5 finetunes were safe.
 
+### Step A0: give E2 back a trained depth head (before stage A)
+
+Why: E2 `final.pt` pairs E2's decoder and alignment with Apple's head.4 (see the top of this doc). Stage A from E2 would re-learn the head anyway. Without A0, any stage A gain mixes the head fix with the extra data, and nobody knows what the lost head cost. A0 is a short finetune of E2 on E2's own data with code at or after #10, so its checkpoints keep the head.
+
+Same recipe as E2, 1000 steps, default train scenes (as E2). `<sha>` is any `main` commit at or after `98aed10`.
+
+```
+modal run modal_app.py --task stage3 --mode train --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1 --steps 1000 --lr 4e-5 --warmup 100 --grad-clip 1000 --kill-val-ratio 1.06 --checkpoint-every 1000 --val-every 500 --max-minutes 15 --timeout-minutes 25
+```
+
+```
+modal run modal_app.py --task stage3 --mode eval --grid 384 --run-name stage3-g384-<sha>-e2h-lr4e5-dc1 --checkpoints final
+```
+
+Measurement M1, the cost of the lost head. It needs no extra GPU. The loss, model, render and validation code are unchanged from `391a8ae` to `98aed10` (checked with `git diff`). So A0's step-0 validation (E2 weights with Apple's head) compares directly with E2's last validation (E2 with its own trained head, same 8 pairs from `ai_011_001`):
+
+```
+modal volume get ml-sharp-data runs/stage3-g384-391a8ae-lr4e5-dc1/val_history.json reports/e2-val.json
+modal volume get ml-sharp-data runs/stage3-g384-<sha>-e2h-lr4e5-dc1/val_history.json reports/e2h-val.json
+python -c "import json; a = json.load(open('reports/e2-val.json'))[-1]; b = json.load(open('reports/e2h-val.json'))[0]; [print(k, round(a[k], 5), round(b[k], 5), f'{(b[k] - a[k]) / abs(a[k]):+.1%}') for k in ('total', 'color_src', 'color_tgt', 'depth_src', 'depth_tgt', 'alpha', 'percep') if a[k]]"
+```
+
+If `total` is within 1 %, the lost head did not matter and the r2, E1 and E2 numbers stand as measured. If it is worse by more, those evals understate the trained models, and the frustum holes and GT PSNR gaps are partly caused by the mismatch.
+
+Gate for A0:
+
+```
+modal volume get ml-sharp-data runs/stage3-g384-<sha>-e2h-lr4e5-dc1/eval/final/report.json reports/e2h-final.json
+python scripts/compare_eval.py --base reports/e2-final.json --new reports/e2h-final.json
+```
+
+Exit 0, with no kill: E2h is the new best. Stage A then starts from `runs/stage3-g384-<sha>-e2h-lr4e5-dc1/checkpoints/final.pt` and gates against `reports/e2h-final.json`. Exit 1: stage A starts from E2 as written below.
+
+Cost (`estimate`): the 1000 steps take 1000 x 0.474 s = 7.9 min = $0.29. Startup, three validation passes and the checkpoint save are not measured; `--timeout-minutes 25` caps the run at $0.93. The eval uses the 15 min placeholder below, $0.56. Total about $0.9 to $1.5.
+
 ### Stage order
 
 | Stage | Grid | Data | Init | Steps | Epochs | Time | Cost | GPU |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| A | 384 | S150 (17,691 pairs) | E2 final | 9000 | 0.51 | 9000 x 0.474 = 4266 s = 71 min | 1.185 h x 2.23 = $2.64 | A100-40GB |
+| A | 384 | S150 (17,691 pairs) | E2h final if A0 passes, else E2 final | 9000 | 0.51 | 9000 x 0.474 = 4266 s = 71 min | 1.185 h x 2.23 = $2.64 | A100-40GB |
 | B | 384 | S300 (35,382 pairs) | best of A (or E2) | 18,000 | 0.51 | 8532 s = 142 min | 2.37 h x 2.23 = $5.29 | A100-40GB |
 | C | 768 | S300 | best 384 | 6000 | 0.17 | 0.73 to 1.64 s per step = 4380 to 9840 s = 1.2 to 2.7 h | 1.22 h x 4.20 = $5.1 up to 2.73 h x 4.20 = $11.5 | H100 |
 
@@ -474,11 +511,12 @@ Budget summary (`estimate`):
 | Item | Low | High |
 | --- | --- | --- |
 | Prep and dry run (section 2) | $0.2 | $2.0 |
+| A0 + 1 eval | $0.9 | $1.5 |
 | 768 check | $0.1 | $0.5 |
 | Stage A + 3 evals | $2.64 + 1.7 = $4.3 | same |
 | Stage B + 3 evals | $5.29 + 1.7 = $7.0 | same |
 | Stage C + 3 evals | $5.1 + 4.2 = $9.3 | $11.5 + 4.2 = $15.7 |
-| Total | about $21 | about $30 |
+| Total | about $22 | about $31 |
 
 A 1-epoch run of stage B instead of 0.5 epoch adds $5.1.
 
@@ -486,7 +524,7 @@ A 1-epoch run of stage B instead of 0.5 epoch adds $5.1.
 
 Replace `<sha>` with the commit of `modal_app.py` you run. `scenes_150.txt` and `scenes_300.txt` hold one scene name per line.
 
-Stage A:
+Stage A (if A0 passed, replace the E2 `final.pt` path with E2h's and `reports/e2-final.json` with `reports/e2h-final.json`):
 
 ```
 modal run modal_app.py --task stage3 --mode check --grid 384 --run-name stage3-g384-<sha>-s150-check --train-scenes "$(paste -sd, scenes_150.txt)" --init-checkpoint runs/stage3-g384-391a8ae-lr4e5-dc1/checkpoints/final.pt --depth-correction 1
@@ -526,7 +564,7 @@ Add `--grad-checkpointing 1` if the check ran out of memory.
 - The Modal function timeout is between 1 second and 24 hours (`https://modal.com/docs/guide/timeouts`, fetched 2026-10-21).
 - Defaults in `modal_app.py` scale with the grid squared: train 120 x (grid / 192)^2 minutes, so 480 min at 384 and **1920 min (32 h) at 768, which is above the 24 h limit**. At 768 always pass `--timeout-minutes` (I use 300). `--max-minutes` defaults to 50 x (grid / 192)^2 = 200 at 384 and 800 at 768. It is a budget inside the loop. Stage B (142 min expected) is close to the 200 min default, so set it explicitly as in the commands below.
 - Keep `--max-minutes` 20 to 30 % below `--timeout-minutes`, so the final checkpoint and the validation pass finish before Modal kills the container.
-- Runs longer than one invocation use `--resume runs/<RUN>/checkpoints/step_NNNNNN.pt`. That flag is on branch `stage3-resume` (commit `c7f98a2`), not in `main` at `391a8ae`. Merge it before any run over about 4 hours. It restores Adam, the schedule, the data position, logs and RNG. I have not read it.
+- Runs longer than one invocation use `--resume runs/<RUN>/checkpoints/step_NNNNNN.pt`. It is in `main` since #10 (`98aed10`). It restores Adam, the schedule, the data position, logs, validation history and RNG, and its CPU check proves a stopped and resumed run equals an uninterrupted one bit for bit. Only checkpoints saved at or after `98aed10` hold the training state; E2 `final.pt` does not, so it can be an init but not a resume point.
 - Detached runs (`modal run --detach`) need both a timeout and `--max-minutes`. After every run, `modal app list` must show nothing running for `ml-sharp-train`.
 
 ### Pass gates
