@@ -19,4 +19,4 @@ No extra flags. It uses the first Apple-check pair.
 ## Gotchas
 
 - `delta_grad_apple_unproject.scale` and `.quaternion` are 0 by design of upstream code (`decompose_covariance_matrices` detaches and runs SVD on the CPU). That is expected and is why `sharp_train.model.to_metric` exists. If `delta_grad_ours` shows a 0 anywhere, the training forward is broken.
-- The monodepth backbone is frozen by `create_monodepth_dpt` (`monodepth_trainable_params` is 0). That matches the paper's default and is not a bug.
+- `create_monodepth_dpt` freezes the monodepth backbone, but `create_predictor` then calls `replicate_head`, which makes new head.4 parameters with `requires_grad` True, so `monodepth_trainable_params` is 66 (2 tensors, the last 1x1 conv of the depth head) and that conv trains.

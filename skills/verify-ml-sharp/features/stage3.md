@@ -47,4 +47,4 @@ modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-gri
 - Depth correction is off by default in stage 3. Stage 2 trained with it, and run `stage3-b29749e` held that alignment frozen, so the decoder learned on ground-truth-corrected depth and was scored on raw monodepth. Compare a `--depth-correction 1` run against the default on the eval `inference` setting, not on `gt_depth`.
 - `history.json` `grad_norm` is the pre-clip norm of the entry's last step. `grad_norm_mean`, `grad_norm_max` and `clipped_fraction` cover every step since the previous entry. `train_meta.json` records `grad_clip` and gets `peak_memory_gb` during the loop.
 - The perceptual net is an ImageNet ResNet-50, baked into the Modal image. The paper's inpainting ResNet-50 is not used. See `docs/training-spec.md`.
-- Checkpoints still exclude monodepth weights and inherit Apple's research-only model license. Renders are Hypersim: credit Hypersim (CC BY-SA 3.0).
+- Checkpoints exclude the frozen monodepth weights but keep the trainable head.4, and inherit Apple's research-only model license. Renders are Hypersim: credit Hypersim (CC BY-SA 3.0).
