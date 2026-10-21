@@ -184,6 +184,7 @@ def perceptual_check(batch):
 
 
 def train_segment(apple_path, checkpoint, dataset, out_dir, start=0, resume=None, stop_after=None):
+    torch.manual_seed(0)
     predictor, _ = stage2.load_checkpoint(str(apple_path), checkpoint)
     captured = {}
 
