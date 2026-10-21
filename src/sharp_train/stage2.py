@@ -36,10 +36,15 @@ def build_grid_predictor(
 
 
 def trained_state(grid_predictor):
+    trainable = {
+        name
+        for name, parameter in grid_predictor.predictor.named_parameters()
+        if parameter.requires_grad
+    }
     return {
         name: value.detach().cpu()
         for name, value in grid_predictor.predictor.state_dict().items()
-        if not name.startswith("monodepth_model.")
+        if not name.startswith("monodepth_model.") or name in trainable
     }
 
 

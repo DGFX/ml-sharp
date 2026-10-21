@@ -209,7 +209,12 @@ def train_segment(apple_path, checkpoint, dataset, out_dir, start=0, resume=None
         resume=resume,
         forward=regularizer_forward,
     )
-    return stage2.trained_state(predictor), captured
+    trainable = {
+        name
+        for name, parameter in predictor.predictor.named_parameters()
+        if parameter.requires_grad
+    }
+    return stage2.trained_state(predictor), captured, trainable
 
 
 def max_difference(first, second):
@@ -238,13 +243,15 @@ def resume_check(data_root, apple_path):
     source = stage2.build_grid_predictor(str(apple_path), CHECK_GRID, reset_decoder=False)
     stage2.save_checkpoint(source, initial, 0)
     del source
-    straight, straight_end = train_segment(apple_path, initial, dataset, workdir / "straight")
-    _, stopped = train_segment(
+    straight, straight_end, trainable = train_segment(
+        apple_path, initial, dataset, workdir / "straight"
+    )
+    _, stopped, _ = train_segment(
         apple_path, initial, dataset, workdir / "stopped", stop_after=RESUME_SPLIT
     )
     saved = workdir / "stopped" / "resume.pt"
     payload = stage2.read_resume(saved)
-    resumed, resumed_end = train_segment(
+    resumed, resumed_end, _ = train_segment(
         apple_path,
         saved,
         dataset,
@@ -252,8 +259,13 @@ def resume_check(data_root, apple_path):
         start=payload["training"]["next_step"],
         resume=payload["training"],
     )
-    restarted, _ = train_segment(
-        apple_path, saved, dataset, workdir / "restarted", start=RESUME_SPLIT
+    restarted, _, _ = train_segment(
+        apple_path,
+        saved,
+        dataset,
+        workdir / "restarted",
+        start=RESUME_SPLIT,
+        stop_after=RESUME_STEPS - RESUME_SPLIT,
     )
     weight_gap = max_difference(straight, resumed)
     optimizer_gap = optimizer_difference(straight_end["optimizer"], resumed_end["optimizer"])
@@ -277,6 +289,7 @@ def resume_check(data_root, apple_path):
             == payload["training"]["next_step"]
             == RESUME_SPLIT
             and len(payload["training"]["window_norms"]) == 1,
+            "checkpoint holds every trainable parameter": trainable <= set(payload["state_dict"]),
             "resumed weights equal uninterrupted weights": weight_gap == 0.0,
             "resumed Adam state equals uninterrupted Adam state": optimizer_gap == 0.0
             and straight_end["optimizer"]["param_groups"][0]["lr"]
