@@ -322,7 +322,7 @@ def stage2_train(
     grad_clip: float = 1000.0,
 ):
     import torch
-    from sharp_train import stage2, train, viz
+    from sharp_train import run, stage2
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
@@ -353,52 +353,26 @@ def stage2_train(
         "backbone_bf16": bool(backbone_bf16),
         "grad_clip": grad_clip,
     }
-    stage2.save_json(out_dir / "train_meta.json", meta)
-    val_history = [{"step": 0, **stage2.validation_loss(predictor, validation, device)}]
-    print(json.dumps({"validation": val_history[-1]}), flush=True)
-
-    def callback(step, last, state):
-        done = step + 1
-        if done % val_every == 0 or last:
-            val_history.append(
-                {"step": done, **stage2.validation_loss(predictor, validation, device)}
-            )
-            print(json.dumps({"validation": val_history[-1]}), flush=True)
-            stage2.save_json(out_dir / "val_history.json", val_history)
-        if done % checkpoint_every == 0 or last:
-            name = "final" if last else f"step_{done:06d}"
-            stage2.save_checkpoint(
-                predictor, out_dir / "checkpoints" / f"{name}.pt", done, {"meta": meta}
-            )
-            volume.commit()
-
-    history = train.train(
+    history, val_history = run.run_training(
         predictor,
         loader,
-        steps,
+        validation,
         out_dir,
+        meta,
+        commit=volume.commit,
+        run_name=run_name,
+        steps=steps,
         lr=lr,
         warmup=warmup,
-        mask_key="mask_visible_tgt",
+        max_minutes=max_minutes,
+        checkpoint_every=checkpoint_every,
+        val_every=val_every,
         log_every=50,
-        max_seconds=max_minutes * 60,
-        callback=callback,
+        depth_correction=True,
         grad_clip=grad_clip,
+        curve_keys=["total", "color_src", "color_tgt", "depth_tgt"],
+        resumable=False,
     )
-    viz.save_curve(
-        history,
-        ["total", "color_src", "color_tgt", "depth_tgt"],
-        out_dir / "train_curve.png",
-        f"{run_name} train",
-    )
-    viz.save_curve(
-        val_history,
-        ["total", "color_src", "color_tgt", "depth_tgt"],
-        out_dir / "val_curve.png",
-        f"{run_name} held-out validation",
-    )
-    stage2.save_json(out_dir / "val_history.json", val_history)
-    volume.commit()
     return {
         "steps": history[-1]["step"] + 1,
         "train_first": history[0],
@@ -571,7 +545,7 @@ def stage3_train(
     resume: str = "",
 ):
     import torch
-    from sharp_train import losses, stage2, train, viz
+    from sharp_train import losses, run, stage2
 
     device = cuda_setup()
     out_dir = RUNS_ROOT / run_name
@@ -610,7 +584,6 @@ def stage3_train(
                 {"checkpoint": str(init_path), "step": first_step},
             ],
         }
-        val_history = resumed["val_history"]
         print(json.dumps({"resumed": str(init_path), "next_step": first_step}), flush=True)
     else:
         meta = {
@@ -638,80 +611,28 @@ def stage3_train(
             "grad_checkpointing": bool(grad_checkpointing),
             "backbone_bf16": bool(backbone_bf16),
         }
-        val_history = [
-            {
-                "step": 0,
-                **stage2.validation_loss(
-                    predictor, validation, device, stage3=perceptual, depth_correction=correction
-                ),
-            }
-        ]
-        print(json.dumps({"validation": val_history[-1]}), flush=True)
-    stage2.save_json(out_dir / "train_meta.json", meta)
-    stage2.save_json(out_dir / "val_history.json", val_history)
-
-    def callback(step, last, state):
-        done = step + 1
-        killed = False
-        if done % val_every == 0 or last:
-            val_history.append(
-                {
-                    "step": done,
-                    **stage2.validation_loss(
-                        predictor,
-                        validation,
-                        device,
-                        stage3=perceptual,
-                        depth_correction=correction,
-                    ),
-                }
-            )
-            print(json.dumps({"validation": val_history[-1]}), flush=True)
-            regressed = train.val_regressed(val_history, kill_val_ratio)
-            killed = regressed and bool(kill_val_ratio)
-            if regressed and not killed:
-                print(
-                    json.dumps({"warning": "non-finite validation total", "step": done}), flush=True
-                )
-            if killed:
-                meta["killed_at_step"] = done
-                stage2.save_json(out_dir / "train_meta.json", meta)
-                print(json.dumps({"killed": done, "kill_val_ratio": kill_val_ratio}), flush=True)
-            stage2.save_json(out_dir / "val_history.json", val_history)
-        if done % checkpoint_every == 0 or last or killed:
-            name = "final" if last or killed else f"step_{done:06d}"
-            stage2.save_checkpoint(
-                predictor,
-                out_dir / "checkpoints" / f"{name}.pt",
-                done,
-                {"meta": meta, "training": state(), "val_history": val_history},
-            )
-            volume.commit()
-        return killed
-
-    history = train.train(
+    history, val_history = run.run_training(
         predictor,
         loader,
-        steps,
+        validation,
         out_dir,
+        meta,
+        commit=volume.commit,
+        run_name=run_name,
+        steps=steps,
         lr=lr,
         warmup=warmup,
-        mask_key="mask_visible_tgt",
+        max_minutes=max_minutes,
+        checkpoint_every=checkpoint_every,
+        val_every=val_every,
         log_every=50,
-        max_seconds=max_minutes * 60,
-        callback=callback,
-        stage3=perceptual,
         depth_correction=correction,
         grad_clip=grad_clip,
-        resume=resumed["training"] if resumed is not None else None,
+        curve_keys=["total", "color_src", "color_tgt", "alpha", "percep", "depth_tgt"],
+        kill_val_ratio=kill_val_ratio,
+        perceptual=perceptual,
+        resume=resumed,
     )
-    curve_keys = ["total", "color_src", "color_tgt", "alpha", "percep", "depth_tgt"]
-    viz.save_curve(history, curve_keys, out_dir / "train_curve.png", f"{run_name} train")
-    viz.save_curve(
-        val_history, curve_keys, out_dir / "val_curve.png", f"{run_name} held-out validation"
-    )
-    stage2.save_json(out_dir / "val_history.json", val_history)
-    volume.commit()
     return {
         "steps": history[-1]["step"] + 1,
         "train_first": history[0],

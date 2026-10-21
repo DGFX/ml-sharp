@@ -334,14 +334,14 @@ def render_videos(predictors, dataset, index, device, out_dir):
 
 
 @torch.no_grad()
-def validation_loss(predictor, batches, device, stage3=None, depth_correction=True):
+def validation_loss(predictor, batches, device, forward, stage3=None, depth_correction=True):
     from sharp_train import train
 
     was_training = predictor.training
     predictor.eval()
     totals = {}
     for batch in batches:
-        terms, _, _ = train.forward_pair(
+        terms, _, _ = forward(
             predictor,
             train.to_device(batch, device),
             mask_key="mask_visible_tgt",
