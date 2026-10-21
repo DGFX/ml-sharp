@@ -47,6 +47,7 @@ These are our stages, not the paper's two-stage curriculum.
 - Code in `src/sharp` and the repo: Apple sample-code license in [LICENSE](LICENSE). Changes are allowed; keep Apple's notice.
 - Apple's released weights (`sharp_2572gikvuh.pt`): [LICENSE_MODEL](LICENSE_MODEL), research use only, no commercial use. Weights we train starting from Apple's weights, including the monodepth backbone we freeze, inherit that restriction.
 - Hypersim: dataset under CC BY-SA 3.0, code under Apple's sample-code license. Credit Hypersim (Roberts et al., ICCV 2021) wherever renders are shown. Details in [docs/training-spec.md](docs/training-spec.md#data-and-license). Data is never committed; it lives on the Modal volume.
+- Plan for more Hypersim scenes, own Blender data, bigger runs, and the open license questions on releasing weights: [docs/data-scaling.md](docs/data-scaling.md).
 
 ## Commands
 
