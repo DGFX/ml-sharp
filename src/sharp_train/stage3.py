@@ -175,7 +175,9 @@ def train_segment(
     apple_path, checkpoint, dataset, validation, out_dir, steps=RESUME_STEPS, start=0, resume=None
 ):
     torch.manual_seed(0)
-    predictor, _ = stage2.load_checkpoint(str(apple_path), checkpoint)
+    predictor, _ = stage2.load_checkpoint(
+        str(apple_path), checkpoint, require_depth_head=resume is not None
+    )
     run.run_training(
         predictor,
         train_stream(dataset, 0, start),
@@ -221,6 +223,21 @@ def without_seconds(history):
     return [{key: value for key, value in entry.items() if key != "seconds"} for entry in history]
 
 
+def headless_load(apple_path, payload, path):
+    state = {
+        name: value
+        for name, value in payload["state_dict"].items()
+        if not name.startswith(stage2.DEPTH_HEAD)
+    }
+    torch.save({**payload, "state_dict": state}, path)
+    source = stage2.load_checkpoint(str(apple_path), path)[0].depth_head
+    try:
+        stage2.load_checkpoint(str(apple_path), path, require_depth_head=True)
+    except KeyError:
+        return source, True
+    return source, False
+
+
 def resume_check(data_root, apple_path):
     val = stage2.val_spec()
     dataset = HypersimPairs(data_root, names=val["pairs"])
@@ -239,6 +256,7 @@ def resume_check(data_root, apple_path):
     )
     saved = workdir / "straight" / "checkpoints" / f"step_{RESUME_SPLIT:06d}.pt"
     payload = stage2.read_resume(saved)
+    headless_head, headless_refused = headless_load(apple_path, payload, workdir / "headless.pt")
     resumed, resumed_end, _ = train_segment(
         apple_path,
         saved,
@@ -279,6 +297,8 @@ def resume_check(data_root, apple_path):
             == RESUME_SPLIT
             and len(payload["training"]["window_norms"]) == 1,
             "checkpoint holds every trainable parameter": trainable <= set(payload["state_dict"]),
+            "a checkpoint without head.4 records Apple's head": headless_head == "apple",
+            "resume refuses a checkpoint without head.4": headless_refused,
             "resumed weights equal uninterrupted weights": weight_gap == 0.0,
             "resumed Adam state equals uninterrupted Adam state": optimizer_gap == 0.0
             and straight_end["optimizer"]["param_groups"][0]["lr"]

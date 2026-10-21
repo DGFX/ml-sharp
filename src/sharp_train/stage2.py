@@ -14,6 +14,7 @@ VIDEO_FRAMES = 90
 VIDEO_RADIUS_RATIO = 0.06
 VIDEO_FPS = 30
 NON_PINHOLE_PATH = Path(__file__).with_name("non_pinhole_scenes.json")
+DEPTH_HEAD = "monodepth_model.monodepth_predictor.head.4."
 
 
 def eval_spec():
@@ -82,8 +83,33 @@ def save_checkpoint(grid_predictor, path, step, extra=None):
     partial.rename(path)
 
 
+def depth_head_source(predictor, keys):
+    keys = set(keys)
+    trainable = {
+        name for name, parameter in predictor.named_parameters() if parameter.requires_grad
+    }
+    head = {name for name in trainable if name.startswith(DEPTH_HEAD)}
+    missing = sorted(trainable - keys) if head & keys else sorted(trainable - head - keys)
+    if missing:
+        raise KeyError(f"checkpoint lacks trainable weights: {missing}")
+    return "checkpoint" if head & keys else "apple"
+
+
+def depth_head_meta(grid_predictor):
+    trains = not grid_predictor.backbone_bf16
+    if not trains:
+        warning = "backbone_bf16 runs monodepth head.4 under no_grad, so it receives no gradient"
+        print(json.dumps({"warning": warning}), flush=True)
+    return {"init_depth_head": grid_predictor.depth_head, "depth_head_trains": trains}
+
+
 def load_checkpoint(
-    apple_checkpoint, path, grid=None, grad_checkpointing=False, backbone_bf16=False
+    apple_checkpoint,
+    path,
+    grid=None,
+    grad_checkpointing=False,
+    backbone_bf16=False,
+    require_depth_head=False,
 ):
     payload = torch.load(path, map_location="cpu", weights_only=True)
     source_grid = payload["grid"]
@@ -101,6 +127,9 @@ def load_checkpoint(
     ]
     if unexpected_missing or result.unexpected_keys:
         raise KeyError(f"checkpoint mismatch: {unexpected_missing} {result.unexpected_keys}")
+    grid_predictor.depth_head = depth_head_source(grid_predictor.predictor, payload["state_dict"])
+    if require_depth_head and grid_predictor.depth_head == "apple":
+        raise KeyError(f"{path} has no trained monodepth head.4; refusing to use Apple's head")
     if "scale_factor" in payload:
         grid_predictor.predictor.init_model.scale_factor = payload["scale_factor"]
     model.rescale_base_scale(grid_predictor, source_grid)

@@ -16,7 +16,6 @@ CHECK_GRID = 384
 MEANS_REL_TOL = 1e-3
 COVARIANCE_REL_TOL = 1e-3
 ATTRIBUTE_ABS_TOL = 1e-4
-DEPTH_HEAD = "monodepth_model.monodepth_predictor.head.4."
 APPLE_DEPTH_HEAD = (
     "apple: this checkpoint has no trained monodepth head.4, so Apple's head is used. "
     "Checkpoints saved before #10 (r2, E1, E2) lack it."
@@ -31,25 +30,21 @@ def default_device():
     return "cpu"
 
 
-def depth_head_source(checkpoint):
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True)
-    has_head = any(name.startswith(DEPTH_HEAD) for name in payload["state_dict"])
-    return "checkpoint" if has_head else APPLE_DEPTH_HEAD
-
-
 def loaded_depth_head(apple_checkpoint, checkpoint):
     grid_predictor, _ = stage2.load_checkpoint(str(apple_checkpoint), checkpoint)
     state = grid_predictor.predictor.state_dict()
-    return {name: state[name].clone() for name in state if name.startswith(DEPTH_HEAD)}
+    head = {name: state[name].clone() for name in state if name.startswith(stage2.DEPTH_HEAD)}
+    return grid_predictor.depth_head, head
 
 
 def predict_ply(apple_checkpoint, checkpoint, image_path, out_path, device="cpu", grid=None):
-    depth_head = depth_head_source(checkpoint)
-    if depth_head != "checkpoint":
-        print(f"warning: {checkpoint}: {APPLE_DEPTH_HEAD}", file=sys.stderr, flush=True)
     grid_predictor, step = stage2.load_checkpoint(
         str(apple_checkpoint), checkpoint, grid=grid or None
     )
+    depth_head = grid_predictor.depth_head
+    if depth_head == "apple":
+        depth_head = APPLE_DEPTH_HEAD
+        print(f"warning: {checkpoint}: {APPLE_DEPTH_HEAD}", file=sys.stderr, flush=True)
     grid_predictor = grid_predictor.to(device).eval()
     image, _, f_px = io.load_rgb(Path(image_path))
     height, width = image.shape[:2]
@@ -82,28 +77,28 @@ def relative_error(value, reference, dims):
 def depth_head_check(apple_checkpoint, checkpoint, workdir):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     state_dict = payload["state_dict"]
-    apple_head = {name: value for name, value in state_dict.items() if name.startswith(DEPTH_HEAD)}
+    apple_head = {
+        name: value for name, value in state_dict.items() if name.startswith(stage2.DEPTH_HEAD)
+    }
     trained_head = {name: value * 1.5 + 0.01 for name, value in apple_head.items()}
     trained_path = Path(workdir) / "trained_head.pt"
     old_path = Path(workdir) / "without_head.pt"
     torch.save({**payload, "state_dict": {**state_dict, **trained_head}}, trained_path)
     without_head = {name: value for name, value in state_dict.items() if name not in apple_head}
     torch.save({**payload, "state_dict": without_head}, old_path)
-    loaded_trained = loaded_depth_head(apple_checkpoint, trained_path)
+    trained_source, loaded_trained = loaded_depth_head(apple_checkpoint, trained_path)
     gc.collect()
-    loaded_old = loaded_depth_head(apple_checkpoint, old_path)
+    old_source, loaded_old = loaded_depth_head(apple_checkpoint, old_path)
     gc.collect()
     return {
         "head_parameters": sum(value.numel() for value in apple_head.values()),
         "criteria": {
             "saved checkpoint holds monodepth head.4": sorted(apple_head)
-            == [f"{DEPTH_HEAD}bias", f"{DEPTH_HEAD}weight"],
-            "a checkpoint with head.4 reports its own depth head": depth_head_source(trained_path)
-            == "checkpoint",
+            == [f"{stage2.DEPTH_HEAD}bias", f"{stage2.DEPTH_HEAD}weight"],
+            "a checkpoint with head.4 reports its own depth head": trained_source == "checkpoint",
             "a checkpoint with head.4 loads that head": loaded_trained.keys() == trained_head.keys()
             and all(torch.equal(loaded_trained[name], trained_head[name]) for name in trained_head),
-            "a checkpoint without head.4 reports Apple's head": depth_head_source(old_path)
-            == APPLE_DEPTH_HEAD,
+            "a checkpoint without head.4 reports Apple's head": old_source == "apple",
             "a checkpoint without head.4 loads Apple's head": loaded_old.keys() == apple_head.keys()
             and all(torch.equal(loaded_old[name], apple_head[name]) for name in apple_head),
         },
