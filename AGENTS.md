@@ -24,7 +24,7 @@ These are our stages, not the paper's two-stage curriculum.
 | --- | --- | --- |
 | 1 | Prove the training loop: view-pair loader, forward, gsplat render in both views, L1 on color and disparity. Gradient check, Apple-weights check, overfit check. | `skills/verify-ml-sharp` |
 | 2 | Smoke run: Hypersim pairs, Gaussian grid 768 to 192, visibility mask on the novel view, short run, LPIPS and DISTS on held-out pairs against Apple weights, camera-move video. | `modal run modal_app.py --task stage2-checks --max-usd 0.93`, then `--task stage2-train --max-usd 2.97`, then `--task stage2-eval --max-usd 1.49` |
-| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Finetune the stage 3 run 2 checkpoint at grid 384 (`A100-40GB`) or 768 (`H100`). Override the GPU with `--gpu` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check --max-usd 1.67`, then `--mode train --max-usd 4.46`, then `--mode eval --max-usd 2.23` |
+| 3 | Full losses: perceptual (feature + Gram) and alpha BCE on the full novel view, regularizers, depth-correction losses. Finetune the stage 3 run 2 checkpoint at grid 384 (`A100-40GB`) or 768 (`H100`). Override the GPU with `--gpu` or `STAGE3_GPU`. | `modal run modal_app.py --task stage3 --mode check --max-usd 1.67`, then `--mode train --lr 1.6e-4 --warmup 300 --max-usd 4.46`, then `--mode eval --max-usd 2.23` |
 
 ## Where things run
 

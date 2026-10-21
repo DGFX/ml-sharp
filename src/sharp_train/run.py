@@ -22,6 +22,8 @@ def latest_checkpoint(checkpoint_dir):
 def check_resume(meta, next_step, grid):
     if next_step >= meta["steps"]:
         raise ValueError(f"run already finished at step {next_step}; use a new run name")
+    if "killed_at_step" in meta:
+        raise ValueError(f"run was killed at step {meta['killed_at_step']}; use a new run name")
     if meta["grid"] != grid:
         raise ValueError(
             f"checkpoint grid {meta['grid']} differs from --grid {grid}; "
