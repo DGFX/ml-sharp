@@ -98,4 +98,16 @@ Please check out the repository [LICENSE](LICENSE) before using the provided cod
 
 This fork adds training code for SHARP in `src/sharp_train`, a Modal app in `modal_app.py`, a Hypersim prep script in `scripts/`, and the paper in `docs/paper/`. See [AGENTS.md](AGENTS.md) for the stage plan, where things run and the budget rules.
 
+### Predict a splat from one image
+
+One image in, one `.ply` Gaussian splat out, from a checkpoint we trained (written by `sharp_train.stage2.save_checkpoint`):
+
+```bash
+PYTHONPATH=src python -m sharp_train.predict --checkpoint final.pt --image photo.jpg --out photo.ply
+modal run modal_app.py --task predict --image photo.jpg --checkpoint runs/<run>/checkpoints/final.pt --out photo.ply
+PYTHONPATH=src python -m sharp_train.predict --check --image data/teaser.jpg
+```
+
+Our checkpoints hold only the trained weights. The frozen monodepth backbone comes from Apple's checkpoint, which `--apple PATH` points at and which is otherwise downloaded to `/tmp/sharp-ckpts`. The grid is the checkpoint's own grid unless you pass `--grid` (`--predict-grid` on Modal). `--device` defaults to `cuda`, then `mps`, then `cpu`. The focal length comes from the image EXIF, as in `sharp predict`. Weights trained from Apple's weights inherit [LICENSE_MODEL](LICENSE_MODEL): research use only. `--check` runs on CPU and is the behavioural check described in [docs/training-spec.md](docs/training-spec.md#predict-a-splat-from-one-image).
+
 Licenses: Apple's code license ([LICENSE](LICENSE)) covers the code. Apple's weights ([LICENSE_MODEL](LICENSE_MODEL)) are for research use only, and so is anything we fine-tune from them. Hypersim is CC BY-SA 3.0.

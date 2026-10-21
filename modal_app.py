@@ -674,6 +674,27 @@ def stage3_eval(run_name: str, checkpoints: str):
     return evaluate_run(run_name, checkpoints)
 
 
+@app.function(gpu=GPU, timeout=15 * 60, volumes={VOLUME_ROOT: volume})
+def predict_ply(image_bytes: bytes, image_name: str, checkpoint: str, grid: int):
+    import tempfile
+
+    from sharp_train import predict
+
+    device = cuda_setup()
+    apple_checkpoint = ensure_checkpoint()
+    path = volume_path(checkpoint)
+    if not path.exists():
+        raise FileNotFoundError(f"missing checkpoint: {path}")
+    with tempfile.TemporaryDirectory() as workdir:
+        image_path = Path(workdir) / f"image{Path(image_name).suffix}"
+        image_path.write_bytes(image_bytes)
+        out_path = Path(workdir) / "splat.ply"
+        summary = predict.predict_ply(
+            apple_checkpoint, path, image_path, out_path, device, grid or None
+        )
+        return out_path.read_bytes(), summary
+
+
 @app.local_entrypoint()
 def main(
     task: str = "stage1",
@@ -703,8 +724,22 @@ def main(
     grad_clip: float = 1000.0,
     kill_val_ratio: float = 0.0,
     resume: str = "",
+    image: str = "",
+    checkpoint: str = "",
+    out: str = "",
+    predict_grid: int = 0,
 ):
     minutes = resolved_max_minutes(max_minutes, grid)
+    if task == "predict":
+        if not image or not checkpoint:
+            raise ValueError("--task predict needs --image and --checkpoint")
+        image_path = Path(image)
+        ply_bytes, summary = predict_ply.remote(
+            image_path.read_bytes(), image_path.name, checkpoint, predict_grid
+        )
+        out_path = Path(out) if out else Path(image_path.stem + ".ply")
+        out_path.write_bytes(ply_bytes)
+        print(json.dumps({**summary, "out": str(out_path)}, indent=1))
     if task == "stage1":
         print(stage1.remote(run_name, eval_scenes, num_apple_pairs, overfit_steps, overfit_lr))
     if task == "stage2-checks":
