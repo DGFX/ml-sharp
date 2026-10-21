@@ -22,11 +22,11 @@ PYTHONPATH=src python -m sharp_train.multigrid
 ```
 PYTHONPATH=src python -m sharp_train.multigrid
 modal run modal_app.py --task stage3 --mode check --run-name stage3-grid384-check-<sha> --grid 384 --init-checkpoint runs/stage3-b29749e/checkpoints/final.pt --grad-checkpointing 1 --max-usd 6.69
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1 --max-usd 17.84
-modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --timeout-minutes 840 --max-usd 58.8
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid384-<sha> --grid 384 --grad-checkpointing 1 --lr 1.6e-4 --warmup 300 --max-usd 17.84
+modal run --detach modal_app.py --task stage3 --mode train --run-name stage3-grid768-<sha> --grid 768 --grad-checkpointing 1 --backbone-bf16 1 --lr 1.6e-4 --warmup 300 --timeout-minutes 840 --max-usd 58.8
 ```
 
-The recipe defaults are `--steps 8000`, `--lr 1.6e-4`, `--warmup 300`, `--depth-correction 0` (the inference depth path, as in [stage 3](stage3.md)), paper loss weights and novel-view color inside the visibility mask. Run 2 held the depth alignment instead, and that mode no longer exists. Omit `--max-minutes` and `--timeout-minutes` to take the grid scale (x4 at 384, x16 at 768). Omit `--gpu` to take `A100-40GB` at 384 and `H100` at 768.
+The recipe is `--steps 8000`, `--lr 1.6e-4` and `--warmup 300` (passed explicitly, a new stage 3 run refuses without them), `--depth-correction 0` (the inference depth path, as in [stage 3](stage3.md)), paper loss weights and novel-view color inside the visibility mask. Run 2 held the depth alignment instead, and that mode no longer exists. Omit `--max-minutes` and `--timeout-minutes` to take the grid scale (x4 at 384, x16 at 768). Omit `--gpu` to take `A100-40GB` at 384 and `H100` at 768.
 
 ## Driving it with modal
 
