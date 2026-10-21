@@ -8,6 +8,7 @@ import torch
 from sharp_train import losses, model, render, viz
 
 SPIKE_GRAD_NORM = 1e4
+MAX_NONFINITE_STEPS = 5
 
 
 def to_device(batch, device):
@@ -84,7 +85,8 @@ def spike_report(predictor, batch, parameters, step, grad_norm, forward, options
 
 
 def val_regressed(val_history, ratio):
-    return bool(ratio) and val_history[-1]["total"] > ratio * val_history[0]["total"]
+    last = val_history[-1]["total"]
+    return not math.isfinite(last) or (bool(ratio) and last > ratio * val_history[0]["total"])
 
 
 def rng_state():
@@ -128,9 +130,11 @@ def train(
     max_norm = grad_clip or math.inf
     options = {"mask_key": mask_key, "stage3": stage3, "depth_correction": depth_correction}
     history, spikes, window, window_norms, first, earlier_seconds = [], [], {}, [], 0, 0.0
+    skipped, nonfinite_run = 0, 0
     if resume is not None:
         optimizer.load_state_dict(resume["optimizer"])
         history, spikes = resume["history"], resume["spikes"]
+        skipped = resume.get("skipped", 0)
         window = {key: value.to(device) for key, value in resume["window"].items()}
         window_norms = list(resume["window_norms"].to(device).unbind())
         first, earlier_seconds = resume["next_step"], resume["seconds"]
@@ -144,6 +148,7 @@ def train(
             "optimizer": optimizer.state_dict(),
             "history": history,
             "spikes": spikes,
+            "skipped": skipped,
             "window": {key: value.cpu() for key, value in window.items()},
             "window_norms": torch.stack(window_norms).cpu() if window_norms else torch.zeros(0),
             "seconds": earlier_seconds + time.time() - started,
@@ -174,7 +179,26 @@ def train(
             )
             print(json.dumps({"spike": spikes[-1]}), flush=True)
             (out_dir / "spikes.json").write_text(json.dumps(spikes, indent=1))
-        optimizer.step()
+        if math.isfinite(float(window_norms[-1])):
+            optimizer.step()
+            nonfinite_run = 0
+        else:
+            skipped += 1
+            nonfinite_run += 1
+            print(
+                json.dumps(
+                    {
+                        "skipped_step": step,
+                        "grad_norm": float(window_norms[-1]),
+                        "in_a_row": nonfinite_run,
+                    }
+                ),
+                flush=True,
+            )
+            if nonfinite_run >= MAX_NONFINITE_STEPS:
+                raise FloatingPointError(
+                    f"non-finite grad norm for {nonfinite_run} steps in a row, last at step {step}"
+                )
         for key, value in terms.items():
             window[key] = window.get(key, 0.0) + value.detach()
         out_of_time = max_seconds is not None and time.time() - started > max_seconds
@@ -189,10 +213,12 @@ def train(
                 "clipped_fraction": float((norms > max_norm).float().mean()),
                 "window": len(window_norms),
             }
+            if skipped:
+                entry["skipped"] = skipped
             entry.update({key: float(value) / len(window_norms) for key, value in window.items()})
             entry["seconds"] = earlier_seconds + time.time() - started
             history.append(entry)
-            window, window_norms = {}, []
+            window, window_norms, skipped = {}, [], 0
             print(json.dumps(entry), flush=True)
             (out_dir / "history.json").write_text(json.dumps(history, indent=1))
             record_peak_memory(out_dir)
