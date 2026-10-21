@@ -616,7 +616,12 @@ def stage3_train(
                 }
             )
             print(json.dumps({"validation": val_history[-1]}), flush=True)
-            killed = train.val_regressed(val_history, kill_val_ratio)
+            regressed = train.val_regressed(val_history, kill_val_ratio)
+            killed = regressed and bool(kill_val_ratio)
+            if regressed and not killed:
+                print(
+                    json.dumps({"warning": "non-finite validation total", "step": done}), flush=True
+                )
             if killed:
                 meta["killed_at_step"] = done
                 stage2.save_json(out_dir / "train_meta.json", meta)
